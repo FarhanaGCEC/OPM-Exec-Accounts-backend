@@ -5,6 +5,8 @@ const express = require('express');
 const cors = require('cors');
 const authRoutes = require('./routes/auth');
 const payablesRoutes = require('./routes/payables');
+const receivablesRoutes = require('./routes/receivables');
+const transactionsRoutes = require('./routes/transactions');
 const { authenticateToken } = require('./middleware/auth');
 const { initDatabase } = require('./config/database');
 
@@ -38,6 +40,12 @@ app.use('/api/auth', authRoutes);
 
 // Payables categories routes (protected)
 app.use('/api/payables', payablesRoutes);
+
+// Receivables categories routes (protected)
+app.use('/api/receivables', receivablesRoutes);
+
+// Transactions routes (protected)
+app.use('/api/transactions', transactionsRoutes);
 
 // Protected route example
 app.get('/api/profile', authenticateToken, (req, res) => {

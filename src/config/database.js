@@ -73,6 +73,51 @@ const initDatabase = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Create receivables_categories table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS receivables_categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create transactions table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+        id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        type VARCHAR(10) NOT NULL CHECK (type IN ('Debit', 'Credit')),
+        category_id INTEGER REFERENCES payables_categories(id) ON DELETE SET NULL,
+        payment_type VARCHAR(50) NOT NULL,
+        cheque_number VARCHAR(50),
+        amount DECIMAL(15, 2) NOT NULL,
+        balance DECIMAL(15, 2) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add created_by column if table exists but column doesn't
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'transactions' AND column_name = 'created_by'
+        ) THEN
+          ALTER TABLE transactions ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+
+    // Create index for faster queries
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date DESC)
+    `);
+
     console.log('✅ Database schema initialized');
   } catch (error) {
     console.error('Error initializing database:', error.message);
