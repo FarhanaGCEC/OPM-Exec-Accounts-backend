@@ -1,6 +1,7 @@
 const express = require('express');
 const Transaction = require('../models/Transaction');
 const { authenticateToken } = require('../middleware/auth');
+const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
 
@@ -16,18 +17,19 @@ router.get('/', authenticateToken, async (req, res) => {
       category: txn.category_name || '-',
       paymentType: txn.payment_type,
       chequeNumber: txn.cheque_number || '-',
-      debit: txn.type === 'Debit' ? parseFloat(txn.amount) : null,
-      credit: txn.type === 'Credit' ? parseFloat(txn.amount) : null,
-      balance: parseFloat(txn.balance),
+      debit: txn.type === 'Debit' ? formatAmount(txn.amount) : null,
+      credit: txn.type === 'Credit' ? formatAmount(txn.amount) : null,
+      balance: formatAmount(txn.balance),
+      remarks: txn.remarks || null,
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
     }));
 
-    // Get current balance (latest transaction balance)
+    // Get current balance (latest transaction balance - last in array since ordered ASC)
     const currentBalance = transactions.length > 0 
-      ? parseFloat(transactions[0].balance) 
-      : 0;
+      ? formatAmount(transactions[transactions.length - 1].balance) 
+      : "0.00";
 
     res.json({
       success: true,
@@ -67,8 +69,9 @@ router.get('/:id', authenticateToken, async (req, res) => {
         categoryName: transaction.category_name,
         paymentType: transaction.payment_type,
         chequeNumber: transaction.cheque_number,
-        amount: parseFloat(transaction.amount),
-        balance: parseFloat(transaction.balance),
+        amount: formatAmount(transaction.amount),
+        balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -85,7 +88,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // Create a new transaction
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { date, type, categoryId, paymentType, chequeNumber, amount } = req.body;
+    const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
 
     // Validation
     if (!date || !type || !paymentType || !amount) {
@@ -102,6 +105,15 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
+    // Validate payment type
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    if (!validPaymentTypes.includes(paymentType.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Payment type must be one of: ${validPaymentTypes.join(', ')}`
+      });
+    }
+
     if (paymentType.toLowerCase() === 'cheque' && !chequeNumber) {
       return res.status(400).json({
         success: false,
@@ -109,12 +121,16 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
-    if (parseFloat(amount) <= 0) {
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
       return res.status(400).json({
         success: false,
         error: 'Amount must be greater than 0'
       });
     }
+
+    // Round amount to 2 decimal places before saving
+    const roundedAmount = roundToTwoDecimals(parsedAmount);
 
     // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
     let formattedDate = date;
@@ -132,7 +148,8 @@ router.post('/', authenticateToken, async (req, res) => {
       categoryId: categoryId ? parseInt(categoryId) : null,
       paymentType: paymentType.toLowerCase(),
       chequeNumber: chequeNumber || null,
-      amount: parseFloat(amount),
+      amount: roundedAmount,
+      remarks: remarks || null,
       createdBy: createdBy
     });
 
@@ -145,9 +162,10 @@ router.post('/', authenticateToken, async (req, res) => {
         category: transaction.category_name || '-',
         paymentType: transaction.payment_type,
         chequeNumber: transaction.cheque_number || '-',
-        debit: transaction.type === 'Debit' ? parseFloat(transaction.amount) : null,
-        credit: transaction.type === 'Credit' ? parseFloat(transaction.amount) : null,
-        balance: parseFloat(transaction.balance),
+        debit: transaction.type === 'Debit' ? formatAmount(transaction.amount) : null,
+        credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
+        balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -166,7 +184,7 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put('/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { date, type, categoryId, paymentType, chequeNumber, amount } = req.body;
+    const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
 
     // Validation
     if (!date || !type || !paymentType || !amount) {
@@ -183,6 +201,15 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
+    // Validate payment type
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    if (!validPaymentTypes.includes(paymentType.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Payment type must be one of: ${validPaymentTypes.join(', ')}`
+      });
+    }
+
     if (paymentType.toLowerCase() === 'cheque' && !chequeNumber) {
       return res.status(400).json({
         success: false,
@@ -190,12 +217,16 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    if (parseFloat(amount) <= 0) {
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
       return res.status(400).json({
         success: false,
         error: 'Amount must be greater than 0'
       });
     }
+
+    // Round amount to 2 decimal places before saving
+    const roundedAmount = roundToTwoDecimals(parsedAmount);
 
     // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
     let formattedDate = date;
@@ -210,7 +241,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
       categoryId: categoryId ? parseInt(categoryId) : null,
       paymentType: paymentType.toLowerCase(),
       chequeNumber: chequeNumber || null,
-      amount: parseFloat(amount)
+      amount: roundedAmount,
+      remarks: remarks || null
     });
 
     if (!transaction) {
@@ -229,9 +261,10 @@ router.put('/:id', authenticateToken, async (req, res) => {
         category: transaction.category_name || '-',
         paymentType: transaction.payment_type,
         chequeNumber: transaction.cheque_number || '-',
-        debit: transaction.type === 'Debit' ? parseFloat(transaction.amount) : null,
-        credit: transaction.type === 'Credit' ? parseFloat(transaction.amount) : null,
-        balance: parseFloat(transaction.balance),
+        debit: transaction.type === 'Debit' ? formatAmount(transaction.amount) : null,
+        credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
+        balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -268,6 +301,25 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to delete transaction'
+    });
+  }
+});
+
+// Recalculate all balances (useful for fixing incorrect balances)
+router.post('/recalculate-balances', authenticateToken, async (req, res) => {
+  try {
+    const finalBalance = await Transaction.recalculateAllBalances();
+    
+    res.json({
+      success: true,
+      message: 'All balances recalculated successfully',
+      finalBalance: formatAmount(finalBalance)
+    });
+  } catch (error) {
+    console.error('Error recalculating balances:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to recalculate balances'
     });
   }
 });
