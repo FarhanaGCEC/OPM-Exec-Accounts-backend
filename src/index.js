@@ -72,6 +72,16 @@ app.use('/api/analytics', analyticsRoutes);
 // Account Summary routes (protected)
 app.use('/api/account-summary', accountSummaryRoutes);
 
+// NEW Credit Card Management System routes (protected)
+const cardsRoutes = require('./routes/cards');
+const statementsRoutes = require('./routes/statements');
+app.use('/api/cards', cardsRoutes);
+app.use('/api/statements', statementsRoutes);
+
+// Aliases for backward compatibility (if frontend uses old endpoint names)
+app.use('/api/credit-cards', cardsRoutes); // Alias for /api/cards
+app.use('/api/credit-card-statements', statementsRoutes); // Alias for /api/statements
+
 // Protected route example
 app.get('/api/profile', authenticateToken, (req, res) => {
   res.json({
