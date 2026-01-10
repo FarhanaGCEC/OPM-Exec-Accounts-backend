@@ -12,6 +12,10 @@ const pdcRoutes = require('./routes/pdc');
 const creditCardPaymentsRoutes = require('./routes/creditCardPayments');
 const analyticsRoutes = require('./routes/analytics');
 const accountSummaryRoutes = require('./routes/accountSummary');
+const statementsRoutes = require('./routes/statements');
+const creditCardsRoutes = require('./routes/creditCards');
+const cardsRoutes = require('./routes/cards');
+const purchaseBillsRoutes = require('./routes/purchaseBills');
 const { authenticateToken } = require('./middleware/auth');
 const { initDatabase } = require('./config/database');
 
@@ -66,21 +70,23 @@ app.use('/api/pdc', pdcRoutes);
 // Credit Card Payments routes (protected)
 app.use('/api/credit-card-payments', creditCardPaymentsRoutes);
 
+// Credit Cards routes (protected)
+app.use('/api/credit-cards', creditCardsRoutes);
+
+// Cards routes (protected) - for card management
+app.use('/api/cards', cardsRoutes);
+
+// Statements routes (protected) - must come after cards routes
+app.use('/api/statements', statementsRoutes);
+
+// GCEC Purchase Bills routes (protected)
+app.use('/api/purchase-bills', purchaseBillsRoutes);
+
 // Analytics routes (protected) - for charts and graphs
 app.use('/api/analytics', analyticsRoutes);
 
 // Account Summary routes (protected)
 app.use('/api/account-summary', accountSummaryRoutes);
-
-// NEW Credit Card Management System routes (protected)
-const cardsRoutes = require('./routes/cards');
-const statementsRoutes = require('./routes/statements');
-app.use('/api/cards', cardsRoutes);
-app.use('/api/statements', statementsRoutes);
-
-// Aliases for backward compatibility (if frontend uses old endpoint names)
-app.use('/api/credit-cards', cardsRoutes); // Alias for /api/cards
-app.use('/api/credit-card-statements', statementsRoutes); // Alias for /api/statements
 
 // Protected route example
 app.get('/api/profile', authenticateToken, (req, res) => {
