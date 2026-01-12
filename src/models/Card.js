@@ -205,6 +205,27 @@ class Card {
     }
   }
 
+  // Activate card
+  static async activate(id) {
+    try {
+      const result = await pool.query(
+        `UPDATE credit_cards_new 
+         SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active, created_at, updated_at`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      return result.rows[0];
+    } catch (error) {
+      throw error;
+    }
+  }
+
   // Get all active cards
   static async getActiveCards() {
     try {

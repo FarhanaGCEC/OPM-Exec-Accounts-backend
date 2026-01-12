@@ -1,11 +1,14 @@
 const Card = require('../models/Card');
 
 class CardController {
-  // GET /api/cards - List all cards
+  // GET /api/cards - List all cards (both active and inactive by default)
   static async listCards(req, res) {
     try {
-      const { include_inactive } = req.query;
-      const includeInactive = include_inactive === 'true' || include_inactive === '1';
+      const { active_only } = req.query;
+      // By default, show all cards (active and inactive)
+      // Only filter to active only if active_only=true is passed
+      const showActiveOnly = active_only === 'true' || active_only === '1';
+      const includeInactive = !showActiveOnly; // Include inactive unless active_only is true
 
       const cards = await Card.getAll(includeInactive);
 
@@ -216,6 +219,34 @@ class CardController {
       res.status(500).json({
         success: false,
         error: 'Failed to deactivate credit card'
+      });
+    }
+  }
+
+  // PATCH /api/cards/:id/activate - Activate card
+  static async activateCard(req, res) {
+    try {
+      const { id } = req.params;
+
+      const card = await Card.activate(id);
+
+      if (!card) {
+        return res.status(404).json({
+          success: false,
+          error: 'Credit card not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Credit card activated successfully',
+        data: card
+      });
+    } catch (error) {
+      console.error('Error activating card:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to activate credit card'
       });
     }
   }
