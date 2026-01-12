@@ -166,6 +166,64 @@ class PDC {
       throw error;
     }
   }
+
+  // Get PDCs near cheque date (for dashboard reminders)
+  // Returns PDCs whose cheque_date is within the specified days range (includes both GCEC PDC and Customer PDC)
+  // Includes overdue cheques (past dates) and upcoming cheques (future dates) - important for reminders
+  static async getNearChequeDate(days = 30) {
+    try {
+      // Use PostgreSQL's CURRENT_DATE and INTERVAL for proper date arithmetic
+      // This avoids timezone issues by using database server's date
+      const result = await pool.query(`
+        SELECT 
+          pdc.id,
+          pdc.cheque_date,
+          pdc.cheque_number,
+          pdc.customer_name,
+          pdc.amount,
+          pdc.cheque_type,
+          pdc.pdc_type,
+          pdc.description,
+          pdc.created_by,
+          u.username as created_by_username,
+          pdc.created_at,
+          pdc.updated_at,
+          (pdc.cheque_date - CURRENT_DATE)::INTEGER as days_remaining,
+          CURRENT_DATE as today_date
+        FROM post_dated_cheques pdc
+        LEFT JOIN users u ON pdc.created_by = u.id
+        WHERE pdc.pdc_type IN ('GCEC PDC', 'Customer PDC')
+          AND pdc.cheque_date >= CURRENT_DATE - (INTERVAL '1 day' * $1)
+          AND pdc.cheque_date <= CURRENT_DATE + (INTERVAL '1 day' * $1)
+        ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
+      `, [days]);
+      
+      if (result.rows.length > 0) {
+      
+      } else {
+        // Debug: Check what CURRENT_DATE is and what dates exist
+        const debugInfo = await pool.query(`
+          SELECT 
+            CURRENT_DATE as today,
+            MIN(cheque_date) as earliest_pdc,
+            MAX(cheque_date) as latest_pdc,
+            COUNT(*) as total_pdcs
+          FROM post_dated_cheques
+          WHERE pdc_type IN ('GCEC PDC', 'Customer PDC')
+        `);
+
+      }
+      
+      // Remove today_date from results before returning
+      return result.rows.map(row => {
+        const { today_date, ...rest } = row;
+        return rest;
+      });
+    } catch (error) {
+      console.error('Error in getNearChequeDate:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = PDC;

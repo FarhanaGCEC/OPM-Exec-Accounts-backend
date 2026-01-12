@@ -26,6 +26,72 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
+// Get PDCs near cheque date (for dashboard reminders)
+router.get('/reminders', authenticateToken, async (req, res) => {
+  try {
+    // Get days parameter from query string (default: 30 days)
+    const days = parseInt(req.query.days) || 30;
+    
+    // Validate days parameter
+    if (isNaN(days) || days < 1 || days > 365) {
+      return res.status(400).json({
+        success: false,
+        error: 'Days parameter must be a number between 1 and 365'
+      });
+    }
+
+    const pdcs = await PDC.getNearChequeDate(days);
+    
+    // Debug: Also check what pdc_types actually exist in the database
+    if (pdcs.length === 0 && req.query.debug === 'true') {
+      const { pool } = require('../config/database');
+      const allTypes = await pool.query(`
+        SELECT DISTINCT pdc_type, COUNT(*) as count 
+        FROM post_dated_cheques 
+        GROUP BY pdc_type
+      `);
+      const allPDCs = await pool.query(`
+        SELECT id, cheque_date, pdc_type, customer_name 
+        FROM post_dated_cheques 
+        ORDER BY cheque_date DESC 
+        LIMIT 10
+      `);
+      
+      return res.json({
+        success: true,
+        data: [],
+        count: 0,
+        days_lookahead: days,
+        debug: {
+          available_types: allTypes.rows,
+          recent_pdcs: allPDCs.rows,
+          message: 'No PDCs found. Check debug info above.'
+        }
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: pdcs.map(pdc => {
+        const formatted = { ...pdc };
+        formatted.amount = formatAmount(pdc.amount);
+        // Ensure days_remaining is a number
+        formatted.days_remaining = parseInt(pdc.days_remaining) || 0;
+        return formatted;
+      }),
+      count: pdcs.length,
+      days_lookahead: days
+    });
+  } catch (error) {
+    console.error('Error fetching PDC reminders:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch PDC reminders',
+      details: error.message
+    });
+  }
+});
+
 // Get a single PDC by ID
 router.get('/:id', authenticateToken, async (req, res) => {
   try {

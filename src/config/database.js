@@ -26,7 +26,7 @@ pool.on('error', (err) => {
 const testConnection = async () => {
   try {
     const result = await pool.query('SELECT NOW()');
-    console.log('Database connection test successful');
+   
     return true;
   } catch (error) {
     console.error('Database connection failed:', error.message);
@@ -423,6 +423,114 @@ const initDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_pdc_cheque_date ON post_dated_cheques(cheque_date DESC)
     `);
 
+    // ============================================
+    // NEW CREDIT CARD MANAGEMENT SYSTEM (UUID-based)
+    // ============================================
+    
+    // Enable UUID extension (required before creating credit_cards_new)
+    await pool.query(`
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+    `);
+
+    // Create credit_cards table (new system) - must be created before credit_card_payments
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS credit_cards_new (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        issuing_bank VARCHAR(255) NOT NULL,
+        card_holder VARCHAR(255) NOT NULL,
+        card_number VARCHAR(50) NOT NULL,
+        expiry_date VARCHAR(10) NOT NULL,
+        credit_limit DECIMAL(15, 2),
+        billing_cycle_days INTEGER NOT NULL DEFAULT 25,
+        statement_day INTEGER NOT NULL DEFAULT 1 CHECK (statement_day >= 1 AND statement_day <= 31),
+        display_order INTEGER NOT NULL DEFAULT 999,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add billing_cycle_days column if table exists but column doesn't
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'credit_cards_new' AND column_name = 'billing_cycle_days'
+        ) THEN
+          ALTER TABLE credit_cards_new ADD COLUMN billing_cycle_days INTEGER NOT NULL DEFAULT 25;
+        END IF;
+      END $$;
+    `);
+
+    // Add statement_day column if table exists but column doesn't
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'credit_cards_new' AND column_name = 'statement_day'
+        ) THEN
+          ALTER TABLE credit_cards_new ADD COLUMN statement_day INTEGER NOT NULL DEFAULT 1 CHECK (statement_day >= 1 AND statement_day <= 31);
+        END IF;
+      END $$;
+    `);
+
+    // Add display_order column if table exists but column doesn't
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'credit_cards_new' AND column_name = 'display_order'
+        ) THEN
+          ALTER TABLE credit_cards_new ADD COLUMN display_order INTEGER NOT NULL DEFAULT 999;
+        END IF;
+      END $$;
+    `);
+
+    // Migrate existing table: Handle column name changes
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        -- Check if table exists
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'credit_cards_new') THEN
+          -- Check if card_number_last4 column exists and rename it to card_number
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'credit_cards_new' AND column_name = 'card_number_last4'
+          ) THEN
+            -- Check if card_number column doesn't exist yet
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns 
+              WHERE table_name = 'credit_cards_new' AND column_name = 'card_number'
+            ) THEN
+              ALTER TABLE credit_cards_new RENAME COLUMN card_number_last4 TO card_number;
+              ALTER TABLE credit_cards_new ALTER COLUMN card_number TYPE VARCHAR(50);
+            ELSE
+              -- If both exist, drop the old one (data migration would be needed, but for now just drop)
+              ALTER TABLE credit_cards_new DROP COLUMN IF EXISTS card_number_last4;
+            END IF;
+          END IF;
+          
+          -- Ensure expiry_date is VARCHAR if it's DATE type
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns 
+            WHERE table_name = 'credit_cards_new' 
+            AND column_name = 'expiry_date' 
+            AND data_type = 'date'
+          ) THEN
+            ALTER TABLE credit_cards_new ALTER COLUMN expiry_date TYPE VARCHAR(10);
+          END IF;
+        END IF;
+      END $$;
+    `);
+
+    // Create index for active cards
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_credit_cards_new_active ON credit_cards_new(is_active) WHERE is_active = TRUE
+    `);
+
     // Create credit_card_payments table if it doesn't exist
     await pool.query(`
       CREATE TABLE IF NOT EXISTS credit_card_payments (
@@ -524,114 +632,6 @@ const initDatabase = async () => {
 
     // Seed default credit cards
     await seedDefaultCreditCards();
-
-    // ============================================
-    // NEW CREDIT CARD MANAGEMENT SYSTEM (UUID-based)
-    // ============================================
-    
-    // Enable UUID extension
-    await pool.query(`
-      CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
-    `);
-
-    // Create credit_cards table (new system)
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS credit_cards_new (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        issuing_bank VARCHAR(255) NOT NULL,
-        card_holder VARCHAR(255) NOT NULL,
-        card_number VARCHAR(50) NOT NULL,
-        expiry_date VARCHAR(10) NOT NULL,
-        credit_limit DECIMAL(15, 2),
-        billing_cycle_days INTEGER NOT NULL DEFAULT 25,
-        statement_day INTEGER NOT NULL DEFAULT 1 CHECK (statement_day >= 1 AND statement_day <= 31),
-        display_order INTEGER NOT NULL DEFAULT 999,
-        is_active BOOLEAN DEFAULT TRUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Add billing_cycle_days column if table exists but column doesn't
-    await pool.query(`
-      DO $$ 
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'credit_cards_new' AND column_name = 'billing_cycle_days'
-        ) THEN
-          ALTER TABLE credit_cards_new ADD COLUMN billing_cycle_days INTEGER NOT NULL DEFAULT 25;
-        END IF;
-      END $$;
-    `);
-
-    // Add statement_day column if table exists but column doesn't
-    await pool.query(`
-      DO $$ 
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'credit_cards_new' AND column_name = 'statement_day'
-        ) THEN
-          ALTER TABLE credit_cards_new ADD COLUMN statement_day INTEGER NOT NULL DEFAULT 1 CHECK (statement_day >= 1 AND statement_day <= 31);
-        END IF;
-      END $$;
-    `);
-
-    // Add display_order column if table exists but column doesn't
-    await pool.query(`
-      DO $$ 
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'credit_cards_new' AND column_name = 'display_order'
-        ) THEN
-          ALTER TABLE credit_cards_new ADD COLUMN display_order INTEGER NOT NULL DEFAULT 999;
-        END IF;
-      END $$;
-    `);
-
-    // Migrate existing table: Handle column name changes
-    await pool.query(`
-      DO $$ 
-      BEGIN
-        -- Check if table exists
-        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'credit_cards_new') THEN
-          -- Check if card_number_last4 column exists and rename it to card_number
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_name = 'credit_cards_new' AND column_name = 'card_number_last4'
-          ) THEN
-            -- Check if card_number column doesn't exist yet
-            IF NOT EXISTS (
-              SELECT 1 FROM information_schema.columns 
-              WHERE table_name = 'credit_cards_new' AND column_name = 'card_number'
-            ) THEN
-              ALTER TABLE credit_cards_new RENAME COLUMN card_number_last4 TO card_number;
-              ALTER TABLE credit_cards_new ALTER COLUMN card_number TYPE VARCHAR(50);
-            ELSE
-              -- If both exist, drop the old one (data migration would be needed, but for now just drop)
-              ALTER TABLE credit_cards_new DROP COLUMN IF EXISTS card_number_last4;
-            END IF;
-          END IF;
-          
-          -- Ensure expiry_date is VARCHAR if it's DATE type
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns 
-            WHERE table_name = 'credit_cards_new' 
-            AND column_name = 'expiry_date' 
-            AND data_type = 'date'
-          ) THEN
-            ALTER TABLE credit_cards_new ALTER COLUMN expiry_date TYPE VARCHAR(10);
-          END IF;
-        END IF;
-      END $$;
-    `);
-
-    // Create index for active cards
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_credit_cards_new_active ON credit_cards_new(is_active) WHERE is_active = TRUE
-    `);
 
     // Create card_statements table (new system)
     await pool.query(`
