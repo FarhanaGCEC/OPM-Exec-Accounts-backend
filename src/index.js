@@ -20,23 +20,54 @@ const { authenticateToken } = require('./middleware/auth');
 const { initDatabase } = require('./config/database');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// Parse PORT as integer, default to 3000 if not set or invalid
+const PORT = parseInt(process.env.PORT, 10) || 3000;
 
 // CORS configuration
 // In development, allow all origins for easier testing
 const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? (process.env.FRONTEND_URL || 'http://localhost:5173')
-    : true, // Allow all origins in development
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    // In development, allow all origins
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    // In production, check against allowed origins
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'http://localhost:5173',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173'
+    ];
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true, // Allow cookies/credentials
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   exposedHeaders: ['Authorization'],
-  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
+  optionsSuccessStatus: 200, // Some legacy browsers (IE11, various SmartTVs) choke on 204
+  preflightContinue: false
 };
 
 // Middleware
 app.use(cors(corsOptions));
+
+// Explicitly handle OPTIONS requests for all routes (additional safety)
+app.options('*', cors(corsOptions));
+
+// Request logging middleware (for debugging)
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url} - Origin: ${req.headers.origin || 'none'}`);
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -97,14 +128,34 @@ app.get('/api/profile', authenticateToken, (req, res) => {
 });
 
 // Initialize database and start server
+// const startServer = async () => {
+//   try {
+//     // Initialize database schema
+//     await initDatabase();
+    
+//     // Start server
+//     app.listen(PORT, () => {
+//       console.log(`Server is running on port ${PORT}`);
+//     });
+//   } catch (error) {
+//     console.error('Failed to start server:', error);
+//     process.exit(1);
+//   }
+// };
 const startServer = async () => {
   try {
     // Initialize database schema
     await initDatabase();
     
-    // Start server
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+    // Validate PORT is a valid number
+    if (isNaN(PORT) || PORT < 1 || PORT > 65535) {
+      throw new Error(`Invalid PORT: ${PORT}. Must be a number between 1 and 65535`);
+    }
+    
+    // Start server (bind to all interfaces)
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server is running on http://0.0.0.0:${PORT}`);
+      console.log(`Server is also accessible on http://localhost:${PORT}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
