@@ -698,6 +698,92 @@ const initDatabase = async () => {
     // Fix existing cards: Update card numbers and expiry dates to correct format
     await fixExistingCardData();
 
+    // Create usd_transactions table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS usd_transactions (
+        id SERIAL PRIMARY KEY,
+        account_number VARCHAR(50),
+        date DATE NOT NULL,
+        description VARCHAR(255) NOT NULL,
+        details VARCHAR(255),
+        debit DECIMAL(15, 2) DEFAULT 0,
+        bank_charges DECIMAL(15, 2) DEFAULT 0,
+        credit DECIMAL(15, 2) DEFAULT 0,
+        balance DECIMAL(15, 2) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create index for faster queries
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_usd_transactions_date ON usd_transactions(date DESC)
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_usd_transactions_account ON usd_transactions(account_number)
+    `);
+
+    // Create gbp_transactions table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS gbp_transactions (
+        id SERIAL PRIMARY KEY,
+        account_number VARCHAR(50),
+        date DATE NOT NULL,
+        description VARCHAR(255) NOT NULL,
+        details VARCHAR(255),
+        debit DECIMAL(15, 2) DEFAULT 0,
+        bank_charges DECIMAL(15, 2) DEFAULT 0,
+        credit DECIMAL(15, 2) DEFAULT 0,
+        balance DECIMAL(15, 2) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create index for faster queries
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_gbp_transactions_date ON gbp_transactions(date DESC)
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_gbp_transactions_account ON gbp_transactions(account_number)
+    `);
+
+    // Create emirates_transactions table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS emirates_transactions (
+        id SERIAL PRIMARY KEY,
+        account_number VARCHAR(50),
+        date DATE NOT NULL,
+        description VARCHAR(255) NOT NULL,
+        details VARCHAR(255),
+        currency VARCHAR(3) NOT NULL DEFAULT 'AED' CHECK (currency IN ('AED', 'USD', 'GBP')),
+        debit DECIMAL(15, 2) DEFAULT 0,
+        bank_charges DECIMAL(15, 2) DEFAULT 0,
+        credit DECIMAL(15, 2) DEFAULT 0,
+        balance DECIMAL(15, 2) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create index for faster queries
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_emirates_transactions_date ON emirates_transactions(date DESC)
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_emirates_transactions_account ON emirates_transactions(account_number)
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_emirates_transactions_currency ON emirates_transactions(currency)
+    `);
+
     console.log('✅ Database schema initialized');
   } catch (error) {
     console.error('Error initializing database:', error.message);

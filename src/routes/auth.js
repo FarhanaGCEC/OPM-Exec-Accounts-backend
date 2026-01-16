@@ -46,6 +46,10 @@ router.post('/signup', async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    // Initialize session activity tracking
+    const sessionManager = require('../services/sessionManager');
+    sessionManager.updateActivity(token);
+
     res.status(201).json({
       message: 'User created successfully',
       token,
@@ -96,6 +100,10 @@ router.post('/login', async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    // Initialize session activity tracking
+    const sessionManager = require('../services/sessionManager');
+    sessionManager.updateActivity(token);
+
     res.json({
       message: 'Login successful',
       token,
@@ -103,6 +111,26 @@ router.post('/login', async (req, res) => {
         id: user.id,
         username: user.username
       }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Logout route - clears session activity tracking
+router.post('/logout', (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+    if (token) {
+      // Remove session from tracking
+      const sessionManager = require('../services/sessionManager');
+      sessionManager.removeSession(token);
+    }
+
+    res.json({
+      message: 'Logout successful'
     });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });

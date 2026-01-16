@@ -26,6 +26,10 @@ router.post('/init/:month', authenticateToken, validateMonthFormat, StatementCon
 // GET /api/statements/detail/:id - Get single statement by ID (must come before :month to avoid route conflict)
 router.get('/detail/:id', authenticateToken, StatementController.getStatement);
 
+// GET /api/statements?year=YYYY&months=1,2,3 - List statements for multiple months using query parameters
+// This must come before /:month to handle query parameter requests
+router.get('/', authenticateToken, StatementController.listStatements);
+
 // POST/PUT/PATCH /api/statements/:id - Update statement (upsert behavior)
 // These must come before GET /:month to avoid route conflicts
 router.post('/:id', authenticateToken, StatementController.updateStatement);

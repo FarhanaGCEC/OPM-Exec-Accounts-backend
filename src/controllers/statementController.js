@@ -85,18 +85,51 @@ class StatementController {
   // GET /api/statements/:month - List statements for a month
   // month format: YYYY-MM (e.g., 2024-02) or "all" for all statements
   // Optional query params: 
-  //   - months: comma-separated months (e.g., "2024-01,2024-02,2024-03") for multiple months
+  //   - year: year in YYYY format (e.g., 2026)
+  //   - months: comma-separated months in YYYY-MM format (e.g., "2024-01,2024-02,2024-03") 
+  //             OR comma-separated month numbers (e.g., "1,2,3") when used with year parameter
   //   - card_id: filter by specific card
   static async listStatements(req, res) {
     try {
       const { month } = req.params;
-      const { card_id, months } = req.query;
+      const { card_id, months, year } = req.query;
 
       // Support multiple months via query parameter
       let selectedMonths = [];
       
-      if (months) {
-        // Parse comma-separated months
+      // Handle year + months query parameters (e.g., ?year=2026&months=1,2,3)
+      if (year && months) {
+        const yearNum = parseInt(year);
+        
+        // Validate year
+        if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid year. Expected a number between 2000 and 2100'
+          });
+        }
+        
+        // Parse comma-separated month numbers
+        const monthNumbers = months.split(',').map(m => m.trim()).filter(m => m);
+        
+        // Convert month numbers to YYYY-MM format
+        for (const monthNumStr of monthNumbers) {
+          const monthNum = parseInt(monthNumStr);
+          
+          // Validate month number
+          if (isNaN(monthNum) || monthNum < 1 || monthNum > 12) {
+            return res.status(400).json({
+              success: false,
+              error: `Invalid month number: ${monthNumStr}. Expected a number between 1 and 12`
+            });
+          }
+          
+          // Convert to YYYY-MM format
+          const monthStr = String(monthNum).padStart(2, '0');
+          selectedMonths.push(`${yearNum}-${monthStr}`);
+        }
+      } else if (months) {
+        // Parse comma-separated months in YYYY-MM format
         selectedMonths = months.split(',').map(m => m.trim()).filter(m => m);
         
         // Validate each month format
@@ -104,7 +137,7 @@ class StatementController {
           if (!/^\d{4}-\d{2}$/.test(m)) {
             return res.status(400).json({
               success: false,
-              error: `Invalid month format: ${m}. Expected YYYY-MM (e.g., 2024-02)`
+              error: `Invalid month format: ${m}. Expected YYYY-MM (e.g., 2024-02) or use year and months parameters (e.g., ?year=2026&months=1,2,3)`
             });
           }
         }
@@ -154,7 +187,7 @@ class StatementController {
         // No month specified - return empty
         return res.status(400).json({
           success: false,
-          error: 'Please specify month(s) using path parameter (:month) or query parameter (months)'
+          error: 'Please specify month(s) using path parameter (:month), query parameter (months), or year and months query parameters (e.g., ?year=2026&months=1,2,3)'
         });
       }
 

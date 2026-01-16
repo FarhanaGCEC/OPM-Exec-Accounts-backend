@@ -16,6 +16,9 @@ const statementsRoutes = require('./routes/statements');
 const creditCardsRoutes = require('./routes/creditCards');
 const cardsRoutes = require('./routes/cards');
 const purchaseBillsRoutes = require('./routes/purchaseBills');
+const usdTransactionsRoutes = require('./routes/usdTransactions');
+const gbpTransactionsRoutes = require('./routes/gbpTransactions');
+const fkEmiratesRoutes = require('./routes/fkEmirates');
 const { authenticateToken } = require('./middleware/auth');
 const { initDatabase } = require('./config/database');
 
@@ -112,6 +115,15 @@ app.use('/api/statements', statementsRoutes);
 
 // GCEC Purchase Bills routes (protected)
 app.use('/api/purchase-bills', purchaseBillsRoutes);
+
+// USD Transactions routes (protected)
+app.use('/api/usd-transactions', usdTransactionsRoutes);
+
+// GBP Transactions routes (protected)
+app.use('/api/gbp-transactions', gbpTransactionsRoutes);
+
+// FK Emirates Transactions routes (protected) - with currency support (AED, USD, GBP)
+app.use('/api/fk-emirates', fkEmiratesRoutes);
 
 // Analytics routes (protected) - for charts and graphs
 app.use('/api/analytics', analyticsRoutes);
