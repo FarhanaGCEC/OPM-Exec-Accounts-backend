@@ -29,7 +29,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     // Get current balance (latest transaction balance)
     const currentBalance = transactions.length > 0 
-      ? formatAmount(transactions[transactions.length - 1].balance) 
+     ? formatAmount(transactions[transactions.length - 1].balance) 
       : "0.00";
 
     res.json({

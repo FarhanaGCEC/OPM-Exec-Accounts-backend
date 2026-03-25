@@ -10,19 +10,23 @@ class User {
       }
 
       // Insert new user
-      const result = await pool.query(
-        'INSERT INTO users (username, password) VALUES ($1, $2) RETURNING id, username, created_at',
+      await pool.query(
+        'INSERT INTO users (username, password) VALUES (?, ?)',
         [username, password]
+      );
+      const result = await pool.query(
+        'SELECT id, username, created_at FROM users WHERE username = ?',
+        [username]
       );
 
       return {
         id: result.rows[0].id,
         username: result.rows[0].username,
-        password: password, // Return hashed password
+        password: password,
         createdAt: result.rows[0].created_at
       };
     } catch (error) {
-      if (error.code === '23505') { // PostgreSQL unique violation
+      if (error.code === 'ER_DUP_ENTRY') {
         throw new Error('Username already exists');
       }
       throw error;
@@ -32,7 +36,7 @@ class User {
   static async findByUsername(username) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, created_at FROM users WHERE username = $1',
+        'SELECT id, username, password, created_at FROM users WHERE username = ?',
         [username]
       );
 
@@ -55,7 +59,7 @@ class User {
   static async findById(id) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, created_at FROM users WHERE id = $1',
+        'SELECT id, username, password, created_at FROM users WHERE id = ?',
         [id]
       );
 

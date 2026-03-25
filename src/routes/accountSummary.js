@@ -13,7 +13,7 @@ router.get('/', authenticateToken, async (req, res) => {
       'SELECT balance FROM transactions ORDER BY id DESC LIMIT 1'
     );
     const totalBalance = balanceResult.rows.length > 0 
-      ? formatAmount(balanceResult.rows[0].balance) 
+     ? formatAmount(balanceResult.rows[0].balance) 
       : "0.00";
 
     // Get total credit (sum of all credit transactions)

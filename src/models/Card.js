@@ -1,4 +1,5 @@
 const { pool } = require('../config/database');
+const { randomUUID } = require('crypto');
 
 class Card {
   // Get all cards (optionally filter by is_active)
@@ -8,13 +9,13 @@ class Card {
       const columnCheck = await pool.query(`
         SELECT column_name 
         FROM information_schema.columns 
-        WHERE table_name = 'credit_cards_new' 
+        WHERE table_schema = DATABASE() AND table_name = 'credit_cards_new' 
         AND column_name IN ('card_number', 'card_number_last4')
         LIMIT 1
       `);
       
       const cardNumberColumn = columnCheck.rows.length > 0 
-        ? columnCheck.rows[0].column_name 
+       ? columnCheck.rows[0].column_name 
         : 'card_number'; // Default to new column name
 
       let query = `
@@ -34,7 +35,7 @@ class Card {
       `;
       
       if (!includeInactive) {
-        query += ` WHERE is_active = TRUE`;
+        query += ` WHERE is_active = 1`;
       }
       
       query += ` ORDER BY display_order ASC, is_active DESC, issuing_bank ASC`;
@@ -65,7 +66,7 @@ class Card {
           created_at,
           updated_at
         FROM credit_cards_new
-        WHERE id = $1`,
+        WHERE id = ?`,
         [id]
       );
 
@@ -82,25 +83,26 @@ class Card {
   // Create new card
   static async create(cardData) {
     try {
-      const { issuingBank, cardHolder, cardNumber, expiryDate, creditLimit, isActive } = cardData;
+      const { issuingBank, cardHolder, cardNumber, expiryDate, creditLimit, billingCycleDays, isActive } = cardData;
+      const id = randomUUID();
 
-      const result = await pool.query(
+      await pool.query(
         `INSERT INTO credit_cards_new 
-         (issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) 
-         RETURNING id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active, created_at, updated_at`,
+         (id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+          id,
           issuingBank,
           cardHolder,
           cardNumber,
           expiryDate,
           creditLimit || null,
-          billingCycleDays || 25,
-          isActive !== undefined ? isActive : true
+          billingCycleDays !== undefined ? billingCycleDays : 25,
+          isActive !== undefined ? (isActive ? 1 : 0) : 1
         ]
       );
 
-      return result.rows[0];
+      return (await this.getById(id));
     } catch (error) {
       throw error;
     }
@@ -109,76 +111,30 @@ class Card {
   // Update card
   static async update(id, cardData) {
     try {
-      const { issuingBank, cardHolder, cardNumber, expiryDate, creditLimit, isActive } = cardData;
+      const { issuingBank, cardHolder, cardNumber, expiryDate, creditLimit, billingCycleDays, isActive } = cardData;
 
       const fields = [];
       const values = [];
-      let paramCount = 0;
 
-      if (issuingBank !== undefined) {
-        paramCount++;
-        fields.push(`issuing_bank = $${paramCount}`);
-        values.push(issuingBank);
-      }
+      if (issuingBank !== undefined) { fields.push('issuing_bank = ?'); values.push(issuingBank); }
+      if (cardHolder !== undefined) { fields.push('card_holder = ?'); values.push(cardHolder); }
+      if (cardNumber !== undefined) { fields.push('card_number = ?'); values.push(cardNumber); }
+      if (expiryDate !== undefined) { fields.push('expiry_date = ?'); values.push(expiryDate); }
+      if (creditLimit !== undefined) { fields.push('credit_limit = ?'); values.push(creditLimit); }
+      if (billingCycleDays !== undefined) { fields.push('billing_cycle_days = ?'); values.push(billingCycleDays); }
+      if (isActive !== undefined) { fields.push('is_active = ?'); values.push(isActive ? 1 : 0); }
 
-      if (cardHolder !== undefined) {
-        paramCount++;
-        fields.push(`card_holder = $${paramCount}`);
-        values.push(cardHolder);
-      }
+      if (fields.length === 0) return await this.getById(id);
 
-      if (cardNumber !== undefined) {
-        paramCount++;
-        fields.push(`card_number = $${paramCount}`);
-        values.push(cardNumber);
-      }
-
-      if (expiryDate !== undefined) {
-        paramCount++;
-        fields.push(`expiry_date = $${paramCount}`);
-        values.push(expiryDate);
-      }
-
-      if (creditLimit !== undefined) {
-        paramCount++;
-        fields.push(`credit_limit = $${paramCount}`);
-        values.push(creditLimit);
-      }
-
-      if (billingCycleDays !== undefined) {
-        paramCount++;
-        fields.push(`billing_cycle_days = $${paramCount}`);
-        values.push(billingCycleDays);
-      }
-
-      if (isActive !== undefined) {
-        paramCount++;
-        fields.push(`is_active = $${paramCount}`);
-        values.push(isActive);
-      }
-
-      if (fields.length === 0) {
-        return await this.getById(id);
-      }
-
-      paramCount++;
-      fields.push(`updated_at = CURRENT_TIMESTAMP`);
+      fields.push('updated_at = CURRENT_TIMESTAMP');
       values.push(id);
 
-      const query = `
-        UPDATE credit_cards_new 
-        SET ${fields.join(', ')}
-        WHERE id = $${paramCount}
-        RETURNING id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active, created_at, updated_at
-      `;
-
-      const result = await pool.query(query, values);
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0];
+      const updateResult = await pool.query(
+        `UPDATE credit_cards_new SET ${fields.join(', ')} WHERE id = ?`,
+        values
+      );
+      if (updateResult.affectedRows === 0) return null;
+      return await this.getById(id);
     } catch (error) {
       throw error;
     }
@@ -188,18 +144,11 @@ class Card {
   static async deactivate(id) {
     try {
       const result = await pool.query(
-        `UPDATE credit_cards_new 
-         SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1
-         RETURNING id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active, created_at, updated_at`,
+        `UPDATE credit_cards_new SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [id]
       );
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0];
+      if (result.affectedRows === 0) return null;
+      return await this.getById(id);
     } catch (error) {
       throw error;
     }
@@ -209,18 +158,11 @@ class Card {
   static async activate(id) {
     try {
       const result = await pool.query(
-        `UPDATE credit_cards_new 
-         SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1
-         RETURNING id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active, created_at, updated_at`,
+        `UPDATE credit_cards_new SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [id]
       );
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0];
+      if (result.affectedRows === 0) return null;
+      return await this.getById(id);
     } catch (error) {
       throw error;
     }
@@ -232,7 +174,7 @@ class Card {
       const result = await pool.query(
         `SELECT id, issuing_bank, card_holder, card_number, billing_cycle_days, statement_day 
          FROM credit_cards_new 
-         WHERE is_active = TRUE 
+         WHERE is_active = 1 
          ORDER BY display_order ASC, issuing_bank ASC`
       );
       return result.rows;

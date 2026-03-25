@@ -5,35 +5,36 @@ const { formatAmount } = require('../utils/formatAmount');
 
 const router = express.Router();
 
+// MySQL date grouping helpers
+const getDateGroupExpr = (period) => {
+  if (period === 'daily') return 'DATE(t.date)';
+  if (period === 'weekly') return 'YEARWEEK(t.date)';
+  return 'DATE_FORMAT(t.date, \'%Y-%m-01\')';
+};
+const getPeriodFormat = (period) => {
+  if (period === 'daily') return 'DATE_FORMAT(DATE(t.date), \'%Y-%m-%d\')';
+  if (period === 'weekly') return 'CONCAT(YEAR(t.date), \'-W\', LPAD(WEEK(t.date), 2, \'0\'))';
+  return 'DATE_FORMAT(t.date, \'%Y-%m\')';
+};
+
 // Get debit/credit analytics for charts
 router.get('/transactions', authenticateToken, async (req, res) => {
   try {
     const { period = 'monthly', startDate, endDate } = req.query;
 
-    let dateFormat, groupBy;
-    if (period === 'daily') {
-      dateFormat = 'YYYY-MM-DD';
-      groupBy = 'DATE(t.date)';
-    } else if (period === 'weekly') {
-      dateFormat = 'YYYY-"W"WW';
-      groupBy = 'DATE_TRUNC(\'week\', t.date)';
-    } else {
-      // monthly (default)
-      dateFormat = 'YYYY-MM';
-      groupBy = 'DATE_TRUNC(\'month\', t.date)';
-    }
+    const groupBy = getDateGroupExpr(period);
+    const periodExpr = getPeriodFormat(period);
 
     let dateFilter = '';
     const params = [];
     if (startDate && endDate) {
-      dateFilter = 'WHERE t.date >= $1 AND t.date <= $2';
+      dateFilter = 'WHERE t.date >= ? AND t.date <= ?';
       params.push(startDate, endDate);
     }
 
-    // Get debit and credit totals grouped by period
     const query = `
       SELECT 
-        TO_CHAR(${groupBy}, '${dateFormat}') as period,
+        ${periodExpr} as period,
         t.type,
         SUM(t.amount) as total_amount,
         COUNT(*) as transaction_count
@@ -43,44 +44,26 @@ router.get('/transactions', authenticateToken, async (req, res) => {
       ORDER BY ${groupBy} DESC, t.type
     `;
 
-    const result = await pool.query(query, params.length > 0 ? params : []);
+    const result = await pool.query(query, params);
 
-    // Format data for charts
     const formattedData = {
       labels: [],
       datasets: [
-        {
-          label: 'Debit',
-          data: [],
-          backgroundColor: 'rgba(239, 68, 68, 0.8)', // Red for debit
-          borderColor: 'rgba(239, 68, 68, 1)',
-          borderWidth: 1
-        },
-        {
-          label: 'Credit',
-          data: [],
-          backgroundColor: 'rgba(34, 197, 94, 0.8)', // Green for credit
-          borderColor: 'rgba(34, 197, 94, 1)',
-          borderWidth: 1
-        }
+        { label: 'Debit', data: [], backgroundColor: 'rgba(239, 68, 68, 0.8)', borderColor: 'rgba(239, 68, 68, 1)', borderWidth: 1 },
+        { label: 'Credit', data: [], backgroundColor: 'rgba(34, 197, 94, 0.8)', borderColor: 'rgba(34, 197, 94, 1)', borderWidth: 1 }
       ]
     };
 
-    // Group by period
     const periodData = {};
     result.rows.forEach(row => {
-      if (!periodData[row.period]) {
-        periodData[row.period] = { Debit: 0, Credit: 0 };
-      }
+      if (!periodData[row.period]) periodData[row.period] = { Debit: 0, Credit: 0 };
       periodData[row.period][row.type] = parseFloat(row.total_amount);
     });
 
-    // Sort periods and populate chart data
-    const sortedPeriods = Object.keys(periodData).sort();
-    sortedPeriods.forEach(period => {
-      formattedData.labels.push(period);
-      formattedData.datasets[0].data.push(formatAmount(periodData[period].Debit || 0));
-      formattedData.datasets[1].data.push(formatAmount(periodData[period].Credit || 0));
+    Object.keys(periodData).sort().forEach(p => {
+      formattedData.labels.push(p);
+      formattedData.datasets[0].data.push(formatAmount(periodData[p].Debit || 0));
+      formattedData.datasets[1].data.push(formatAmount(periodData[p].Credit || 0));
     });
 
     const totalDebit = result.rows.filter(r => r.type === 'Debit').reduce((sum, r) => sum + parseFloat(r.total_amount), 0);
@@ -98,70 +81,49 @@ router.get('/transactions', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching analytics:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch transaction analytics'
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch transaction analytics' });
   }
 });
 
-// Get monthly summary (simplified for bar charts)
+// Get monthly summary
 router.get('/monthly-summary', authenticateToken, async (req, res) => {
   try {
     const { year = new Date().getFullYear() } = req.query;
 
     const query = `
       SELECT 
-        TO_CHAR(DATE_TRUNC('month', t.date), 'Mon YYYY') as month,
-        TO_CHAR(DATE_TRUNC('month', t.date), 'YYYY-MM') as month_sort,
+        DATE_FORMAT(t.date, '%b %Y') as month,
+        DATE_FORMAT(t.date, '%Y-%m') as month_sort,
         t.type,
         SUM(t.amount) as total_amount,
         COUNT(*) as count
       FROM transactions t
-      WHERE EXTRACT(YEAR FROM t.date) = $1
-      GROUP BY DATE_TRUNC('month', t.date), t.type
-      ORDER BY DATE_TRUNC('month', t.date) ASC, t.type
+      WHERE YEAR(t.date) = ?
+      GROUP BY DATE_FORMAT(t.date, '%Y-%m'), DATE_FORMAT(t.date, '%b %Y'), t.type
+      ORDER BY DATE_FORMAT(t.date, '%Y-%m') ASC, t.type
     `;
 
     const result = await pool.query(query, [year]);
 
-    // Format for chart
     const monthlyData = {};
     result.rows.forEach(row => {
       if (!monthlyData[row.month_sort]) {
-        monthlyData[row.month_sort] = {
-          month: row.month,
-          Debit: 0,
-          Credit: 0
-        };
+        monthlyData[row.month_sort] = { month: row.month, Debit: 0, Credit: 0 };
       }
       monthlyData[row.month_sort][row.type] = parseFloat(row.total_amount);
     });
 
-    const chartData = {
-      labels: [],
-      debit: [],
-      credit: []
-    };
-
+    const chartData = { labels: [], debit: [], credit: [] };
     Object.keys(monthlyData).sort().forEach(key => {
       chartData.labels.push(monthlyData[key].month);
       chartData.debit.push(formatAmount(monthlyData[key].Debit));
       chartData.credit.push(formatAmount(monthlyData[key].Credit));
     });
 
-    res.json({
-      success: true,
-      year: parseInt(year),
-      data: chartData,
-      raw: monthlyData
-    });
+    res.json({ success: true, year: parseInt(year), data: chartData, raw: monthlyData });
   } catch (error) {
     console.error('Error fetching monthly summary:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch monthly summary'
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch monthly summary' });
   }
 });
 
@@ -172,17 +134,13 @@ router.get('/category-summary', authenticateToken, async (req, res) => {
 
     let dateFilter = '';
     const params = [];
-    let paramIndex = 1;
-
     if (startDate && endDate) {
-      dateFilter = `WHERE t.date >= $${paramIndex} AND t.date <= $${paramIndex + 1}`;
+      dateFilter = 'WHERE t.date >= ? AND t.date <= ?';
       params.push(startDate, endDate);
-      paramIndex += 2;
     }
-
     if (type) {
       dateFilter += dateFilter ? ' AND' : 'WHERE';
-      dateFilter += ` t.type = $${paramIndex}`;
+      dateFilter += ' t.type = ?';
       params.push(type);
     }
 
@@ -213,10 +171,7 @@ router.get('/category-summary', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching category summary:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch category summary'
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch category summary' });
   }
 });
 
@@ -225,14 +180,7 @@ router.get('/balance-trend', authenticateToken, async (req, res) => {
   try {
     const { period = 'monthly', limit = 12 } = req.query;
 
-    let groupBy;
-    if (period === 'daily') {
-      groupBy = 'DATE(t.date)';
-    } else if (period === 'weekly') {
-      groupBy = 'DATE_TRUNC(\'week\', t.date)';
-    } else {
-      groupBy = 'DATE_TRUNC(\'month\', t.date)';
-    }
+    const groupBy = getDateGroupExpr(period);
 
     const query = `
       SELECT 
@@ -243,17 +191,12 @@ router.get('/balance-trend', authenticateToken, async (req, res) => {
       FROM transactions t
       GROUP BY ${groupBy}
       ORDER BY ${groupBy} DESC
-      LIMIT $1
+      LIMIT ?
     `;
 
     const result = await pool.query(query, [parseInt(limit)]);
 
-    const trendData = {
-      labels: [],
-      balances: [],
-      openingBalances: [],
-      closingBalances: []
-    };
+    const trendData = { labels: [], balances: [], openingBalances: [], closingBalances: [] };
 
     result.rows.reverse().forEach(row => {
       const date = new Date(row.period);
@@ -266,26 +209,17 @@ router.get('/balance-trend', authenticateToken, async (req, res) => {
       } else {
         label = date.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
       }
-
       trendData.labels.push(label);
       trendData.balances.push(formatAmount(row.closing_balance));
       trendData.openingBalances.push(formatAmount(row.opening_balance));
       trendData.closingBalances.push(formatAmount(row.closing_balance));
     });
 
-    res.json({
-      success: true,
-      period: period,
-      data: trendData
-    });
+    res.json({ success: true, period: period, data: trendData });
   } catch (error) {
     console.error('Error fetching balance trend:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch balance trend'
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch balance trend' });
   }
 });
 
 module.exports = router;
-

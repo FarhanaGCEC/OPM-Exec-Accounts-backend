@@ -55,7 +55,7 @@ class CreditCardPayment {
         FROM credit_card_payments ccp
         LEFT JOIN users u ON ccp.created_by = u.id
         LEFT JOIN credit_cards_new c ON ccp.credit_card_id = c.id
-        WHERE ccp.id = $1
+        WHERE ccp.id = ?
       `, [id]);
 
       if (result.rows.length === 0) {
@@ -76,8 +76,7 @@ class CreditCardPayment {
       const result = await pool.query(
         `INSERT INTO credit_card_payments 
          (payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) 
-         RETURNING id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by, created_at, updated_at`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           paymentDate,
           creditCardId || null,
@@ -88,6 +87,9 @@ class CreditCardPayment {
           createdBy || null
         ]
       );
+      const fetchResult = await pool.query(
+        'SELECT id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by, created_at, updated_at FROM credit_card_payments WHERE id = LAST_INSERT_ID()'
+      );
 
       // Get card details and created_by username
       let cardDetails = null;
@@ -95,7 +97,7 @@ class CreditCardPayment {
 
       if (creditCardId) {
         const cardResult = await pool.query(
-          'SELECT id, issuing_bank, card_holder, card_number FROM credit_cards_new WHERE id = $1',
+          'SELECT id, issuing_bank, card_holder, card_number FROM credit_cards_new WHERE id = ?',
           [creditCardId]
         );
         if (cardResult.rows.length > 0) {
@@ -105,7 +107,7 @@ class CreditCardPayment {
 
       if (createdBy) {
         const userResult = await pool.query(
-          'SELECT username FROM users WHERE id = $1',
+          'SELECT username FROM users WHERE id = ?',
           [createdBy]
         );
         if (userResult.rows.length > 0) {
@@ -113,7 +115,7 @@ class CreditCardPayment {
         }
       }
 
-      const payment = result.rows[0];
+      const payment = fetchResult.rows[0];
       return {
         ...payment,
         card_id: cardDetails?.id || null,
@@ -134,72 +136,33 @@ class CreditCardPayment {
 
       const updateFields = [];
       const values = [];
-      let paramCount = 0;
 
-      if (paymentDate !== undefined) {
-        paramCount++;
-        updateFields.push(`payment_date = $${paramCount}`);
-        values.push(paymentDate);
-      }
+      if (paymentDate !== undefined) { updateFields.push('payment_date = ?'); values.push(paymentDate); }
+      if (creditCardId !== undefined) { updateFields.push('credit_card_id = ?'); values.push(creditCardId || null); }
+      if (customerName !== undefined) { updateFields.push('customer_name = ?'); values.push(customerName || null); }
+      if (paymentMethod !== undefined) { updateFields.push('payment_method = ?'); values.push(paymentMethod || 'Credit Card'); }
+      if (amount !== undefined) { updateFields.push('amount = ?'); values.push(amount); }
+      if (remarks !== undefined) { updateFields.push('remarks = ?'); values.push(remarks || null); }
 
-      if (creditCardId !== undefined) {
-        paramCount++;
-        updateFields.push(`credit_card_id = $${paramCount}`);
-        values.push(creditCardId || null);
-      }
+      if (updateFields.length === 0) return await this.getById(id);
 
-      if (customerName !== undefined) {
-        paramCount++;
-        updateFields.push(`customer_name = $${paramCount}`);
-        values.push(customerName || null);
-      }
-
-      if (paymentMethod !== undefined) {
-        paramCount++;
-        updateFields.push(`payment_method = $${paramCount}`);
-        values.push(paymentMethod || 'Credit Card');
-      }
-
-      if (amount !== undefined) {
-        paramCount++;
-        updateFields.push(`amount = $${paramCount}`);
-        values.push(amount);
-      }
-
-      if (remarks !== undefined) {
-        paramCount++;
-        updateFields.push(`remarks = $${paramCount}`);
-        values.push(remarks || null);
-      }
-
-      if (updateFields.length === 0) {
-        return await this.getById(id);
-      }
-
-      paramCount++;
-      updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+      updateFields.push('updated_at = CURRENT_TIMESTAMP');
       values.push(id);
 
-      const result = await pool.query(
-        `UPDATE credit_card_payments 
-         SET ${updateFields.join(', ')}
-         WHERE id = $${paramCount}
-         RETURNING id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by, created_at, updated_at`,
+      const updateResult = await pool.query(
+        `UPDATE credit_card_payments SET ${updateFields.join(', ')} WHERE id = ?`,
         values
       );
+      if (updateResult.affectedRows === 0) return null;
 
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      // Get card details and created_by username
-      const payment = result.rows[0];
+      const payment = await this.getById(id);
+      if (!payment) return null;
       let cardDetails = null;
       let createdByUsername = null;
 
       if (payment.credit_card_id) {
         const cardResult = await pool.query(
-          'SELECT id, issuing_bank, card_holder, card_number FROM credit_cards_new WHERE id = $1',
+          'SELECT id, issuing_bank, card_holder, card_number FROM credit_cards_new WHERE id = ?',
           [payment.credit_card_id]
         );
         if (cardResult.rows.length > 0) {
@@ -209,7 +172,7 @@ class CreditCardPayment {
 
       if (payment.created_by) {
         const userResult = await pool.query(
-          'SELECT username FROM users WHERE id = $1',
+          'SELECT username FROM users WHERE id = ?',
           [payment.created_by]
         );
         if (userResult.rows.length > 0) {
@@ -234,11 +197,11 @@ class CreditCardPayment {
   static async delete(id) {
     try {
       const result = await pool.query(
-        'DELETE FROM credit_card_payments WHERE id = $1 RETURNING id',
+        'DELETE FROM credit_card_payments WHERE id = ?',
         [id]
       );
 
-      return result.rows.length > 0;
+      return result.affectedRows > 0;
     } catch (error) {
       throw error;
     }

@@ -85,7 +85,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     const gcecPdcQuery = `
       SELECT 
         pdc.id,
-        pdc.cheque_date::text as date,
+        DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') as date,
         pdc.cheque_number,
         pdc.customer_name,
         pdc.amount,
@@ -122,7 +122,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     const customerPdcQuery = `
       SELECT 
         pdc.id,
-        pdc.cheque_date::text as date,
+        DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') as date,
         pdc.cheque_number,
         pdc.customer_name,
         pdc.amount,
@@ -159,7 +159,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     const purchaseBillQuery = `
       SELECT 
         pb.id,
-        pb.bill_date::text as date,
+        DATE_FORMAT(pb.bill_date, '%Y-%m-%d') as date,
         pb.invoice_number,
         pb.vendor_name,
         pb.bill_number,
@@ -250,7 +250,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     // Get current balance (latest transaction balance - last in array since ordered ASC)
     const currentBalance = transactions.length > 0 
-      ? formatAmount(transactions[transactions.length - 1].balance) 
+     ? formatAmount(transactions[transactions.length - 1].balance) 
       : "0.00";
 
     res.json({

@@ -17,7 +17,7 @@ class PayablesCategory {
   static async getById(id) {
     try {
       const result = await pool.query(
-        'SELECT id, name, created_at, updated_at FROM payables_categories WHERE id = $1',
+        'SELECT id, name, created_at, updated_at FROM payables_categories WHERE id = ?',
         [id]
       );
 
@@ -34,14 +34,13 @@ class PayablesCategory {
   // Create a new payables category
   static async create(name) {
     try {
+      await pool.query('INSERT INTO payables_categories (name) VALUES (?)', [name]);
       const result = await pool.query(
-        'INSERT INTO payables_categories (name) VALUES ($1) RETURNING id, name, created_at, updated_at',
-        [name]
+        'SELECT id, name, created_at, updated_at FROM payables_categories WHERE id = LAST_INSERT_ID()'
       );
-
       return result.rows[0];
     } catch (error) {
-      if (error.code === '23505') { // PostgreSQL unique violation
+      if (error.code === 'ER_DUP_ENTRY') {
         throw new Error('Category name already exists');
       }
       throw error;
@@ -51,18 +50,18 @@ class PayablesCategory {
   // Update a payables category
   static async update(id, name) {
     try {
-      const result = await pool.query(
-        'UPDATE payables_categories SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, name, created_at, updated_at',
+      const updateResult = await pool.query(
+        'UPDATE payables_categories SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         [name, id]
       );
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0];
+      if (updateResult.affectedRows === 0) return null;
+      const result = await pool.query(
+        'SELECT id, name, created_at, updated_at FROM payables_categories WHERE id = ?',
+        [id]
+      );
+      return result.rows[0] || null;
     } catch (error) {
-      if (error.code === '23505') { // PostgreSQL unique violation
+      if (error.code === 'ER_DUP_ENTRY') {
         throw new Error('Category name already exists');
       }
       throw error;
@@ -73,11 +72,10 @@ class PayablesCategory {
   static async delete(id) {
     try {
       const result = await pool.query(
-        'DELETE FROM payables_categories WHERE id = $1 RETURNING id',
+        'DELETE FROM payables_categories WHERE id = ?',
         [id]
       );
-
-      return result.rows.length > 0;
+      return result.affectedRows > 0;
     } catch (error) {
       throw error;
     }

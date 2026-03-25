@@ -1,6 +1,7 @@
 const Statement = require('../models/Statement');
 const Card = require('../models/Card');
 const { pool } = require('../config/database');
+const { randomUUID } = require('crypto');
 
 class StatementService {
   /**
@@ -70,13 +71,13 @@ class StatementService {
     const client = await pool.connect();
 
     try {
-      await client.query('BEGIN');
+      await client.beginTransaction();
 
       // Get all active cards
       const activeCards = await Card.getActiveCards();
 
       if (activeCards.length === 0) {
-        await client.query('ROLLBACK');
+        await client.rollback();
         throw new Error('No active credit cards found');
       }
 
@@ -124,7 +125,7 @@ class StatementService {
 
         // Get card's billing_cycle_days and statement_day
         const cardDetails = await client.query(
-          'SELECT billing_cycle_days, statement_day FROM credit_cards_new WHERE id = $1',
+          'SELECT billing_cycle_days, statement_day FROM credit_cards_new WHERE id = ?',
           [card.id]
         );
         const billingCycleDays = cardDetails.rows[0]?.billing_cycle_days || 25;
@@ -132,9 +133,9 @@ class StatementService {
 
         // Calculate default statement_date using card's statement_day for the selected month
         // Handle cases where statement_day might exceed days in month (use last day of month)
-        const daysInMonth = new Date(yearNum, monthNumInt, 0).getDate();
+        const daysInMonth = new Date(yearNum, monthNum, 0).getDate();
         const finalStatementDay = Math.min(statementDay, daysInMonth);
-        const defaultStatementDate = new Date(yearNum, monthNumInt - 1, finalStatementDay).toISOString().split('T')[0];
+        const defaultStatementDate = new Date(yearNum, monthNum - 1, finalStatementDay).toISOString().split('T')[0];
 
         // Use custom statement_date if provided, otherwise use card's statement_day
         // Priority: custom date (by card_id or card_number) > card's statement_day
@@ -186,14 +187,15 @@ class StatementService {
           paymentStatus: 'PARTIAL'
         };
 
-        // Insert statement
-        const result = await client.query(
+        // Insert statement (generate UUID for MySQL compatibility)
+        const statementId = randomUUID();
+        await client.query(
           `INSERT INTO card_statements 
-           (credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
+           (id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
             pending_amount, epp_balance, balance_transfer, payment_status) 
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
-           RETURNING id, credit_card_id, statement_month`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
+            statementId,
             statementData.creditCardId,
             statementData.statementMonth,
             statementData.statementDate,
@@ -210,15 +212,15 @@ class StatementService {
         );
 
         createdStatements.push({
-          id: result.rows[0].id,
-          credit_card_id: result.rows[0].credit_card_id,
-          statement_month: result.rows[0].statement_month,
+          id: statementId,
+          credit_card_id: statementData.creditCardId,
+          statement_month: statementData.statementMonth,
           issuing_bank: card.issuing_bank,
           card_holder: card.card_holder
         });
       }
 
-      await client.query('COMMIT');
+      await client.commit();
 
       return {
         created: createdStatements,
@@ -227,7 +229,7 @@ class StatementService {
         totalSkipped: skippedStatements.length
       };
     } catch (error) {
-      await client.query('ROLLBACK');
+      await client.rollback();
       throw error;
     } finally {
       client.release();
@@ -246,15 +248,15 @@ class StatementService {
 
     // Merge existing values with update data
     const totalDue = updateData.total_due !== undefined 
-      ? parseFloat(updateData.total_due) 
+     ? parseFloat(updateData.total_due) 
       : parseFloat(existing.total_due);
     
     const paidAmount = updateData.paid_amount !== undefined 
-      ? parseFloat(updateData.paid_amount) 
+     ? parseFloat(updateData.paid_amount) 
       : parseFloat(existing.paid_amount);
 
     const eppBalance = updateData.epp_balance !== undefined 
-      ? parseFloat(updateData.epp_balance) 
+     ? parseFloat(updateData.epp_balance) 
       : parseFloat(existing.epp_balance || 0);
 
     // Validate numeric fields >= 0

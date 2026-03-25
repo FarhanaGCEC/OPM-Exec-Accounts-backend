@@ -43,7 +43,7 @@ class CreditCard {
           cc.created_at,
           cc.updated_at
         FROM credit_cards cc
-        WHERE cc.id = $1
+        WHERE cc.id = ?
       `, [id]);
 
       if (result.rows.length === 0) {
@@ -64,8 +64,7 @@ class CreditCard {
       const result = await pool.query(
         `INSERT INTO credit_cards 
          (issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-         RETURNING id, issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default, created_at, updated_at`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           issuingBank,
           cardHolder,
@@ -73,12 +72,14 @@ class CreditCard {
           expiry,
           cvv || null,
           amountLimit || null,
-          isSystem || false,
-          isDefault || false
+          isSystem ? 1 : 0,
+          isDefault ? 1 : 0
         ]
       );
-
-      return result.rows[0];
+      const fetchResult = await pool.query(
+        'SELECT id, issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default, created_at, updated_at FROM credit_cards WHERE id = LAST_INSERT_ID()'
+      );
+      return fetchResult.rows[0];
     } catch (error) {
       throw error;
     }
@@ -100,10 +101,9 @@ class CreditCard {
       
       const result = await pool.query(
         `UPDATE credit_cards 
-         SET issuing_bank = $1, card_holder = $2, card_number = $3, 
-             expiry = $4, cvv = $5, amount_limit = $6, is_default = $7, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $8
-         RETURNING id, issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default, created_at, updated_at`,
+         SET issuing_bank = ?, card_holder = ?, card_number = ?, 
+             expiry = ?, cvv = ?, amount_limit = ?, is_default = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
         [
           issuingBank,
           cardHolder,
@@ -116,11 +116,8 @@ class CreditCard {
         ]
       );
 
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      return result.rows[0];
+      if (result.affectedRows === 0) return null;
+      return await this.getById(id);
     } catch (error) {
       throw error;
     }
@@ -140,11 +137,11 @@ class CreditCard {
       }
 
       const result = await pool.query(
-        'DELETE FROM credit_cards WHERE id = $1 RETURNING id',
+        'DELETE FROM credit_cards WHERE id = ?',
         [id]
       );
 
-      return result.rows.length > 0;
+      return result.affectedRows > 0;
     } catch (error) {
       throw error;
     }

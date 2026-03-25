@@ -10,7 +10,7 @@ class EmiratesTransaction {
   static async getLatestBalance(currency) {
     try {
       const result = await pool.query(
-        'SELECT balance FROM emirates_transactions WHERE currency = $1 ORDER BY date DESC, id DESC LIMIT 1',
+        'SELECT balance FROM emirates_transactions WHERE currency = ? ORDER BY date DESC, id DESC LIMIT 1',
         [currency]
       );
       return result.rows.length > 0 ? parseFloat(result.rows[0].balance) : 0;
@@ -24,7 +24,7 @@ class EmiratesTransaction {
     try {
       const result = await pool.query(
         `SELECT balance FROM emirates_transactions 
-         WHERE date < $1 AND currency = $2
+         WHERE date < ? AND currency = ?
          ORDER BY date DESC, id DESC LIMIT 1`,
         [date, currency]
       );
@@ -84,7 +84,7 @@ class EmiratesTransaction {
           t.updated_at
         FROM emirates_transactions t
         LEFT JOIN users u ON t.created_by = u.id
-        WHERE t.id = $1
+        WHERE t.id = ?
       `, [id]);
 
       if (result.rows.length === 0) {
@@ -125,7 +125,7 @@ class EmiratesTransaction {
       const sameDateTransactions = await pool.query(
         `SELECT balance, debit, bank_charges, credit 
          FROM emirates_transactions 
-         WHERE date = $1 AND currency = $2
+         WHERE date = ? AND currency = ?
          ORDER BY id DESC`,
         [date, transactionCurrency]
       );
@@ -145,8 +145,7 @@ class EmiratesTransaction {
       let insertQuery = `
         INSERT INTO emirates_transactions 
         (account_number, date, description, details, currency, debit, bank_charges, credit, balance, created_by) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
-        RETURNING id, account_number, date, description, details, currency, debit, bank_charges, credit, balance, created_by, created_at
+        VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
       `;
       const insertParams = [
         accountNumber || null,
@@ -161,16 +160,17 @@ class EmiratesTransaction {
         createdBy || null
       ];
       
-      const result = await pool.query(insertQuery, insertParams);
+      await pool.query(insertQuery, insertParams);
+      const insertResult = await pool.query('SELECT id FROM emirates_transactions WHERE id = LAST_INSERT_ID()');
+      const insertedId = insertResult.rows[0].id;
 
       // Recalculate all subsequent transactions (by date, then by id) for the same currency
-      const insertedId = result.rows[0].id;
       const subsequentTransactions = await pool.query(
         `SELECT id, debit, bank_charges, credit 
          FROM emirates_transactions 
-         WHERE currency = $1 AND (date > $2 OR (date = $2 AND id > $3))
+         WHERE currency = ? AND (date > ? OR (date = ? AND id > ?))
          ORDER BY date ASC, id ASC`,
-        [transactionCurrency, date, insertedId]
+        [transactionCurrency, date, date, insertedId]
       );
 
       let currentBalance = newBalance;
@@ -179,7 +179,7 @@ class EmiratesTransaction {
         currentBalance = roundToTwoDecimals(currentBalance);
 
         await pool.query(
-          'UPDATE emirates_transactions SET balance = $1 WHERE id = $2',
+          'UPDATE emirates_transactions SET balance = ? WHERE id = ?',
           [currentBalance, txn.id]
         );
       }
@@ -188,7 +188,7 @@ class EmiratesTransaction {
       let createdByUsername = null;
       if (createdBy) {
         const userResult = await pool.query(
-          'SELECT username FROM users WHERE id = $1',
+          'SELECT username FROM users WHERE id = ?',
           [createdBy]
         );
         if (userResult.rows.length > 0) {
@@ -196,7 +196,11 @@ class EmiratesTransaction {
         }
       }
 
-      const transaction = result.rows[0];
+      const fetchResult = await pool.query(
+        'SELECT id, account_number, date, description, details, currency, debit, bank_charges, credit, balance, created_by, created_at FROM emirates_transactions WHERE id = ?',
+        [insertedId]
+      );
+      const transaction = fetchResult.rows[0];
       return {
         ...transaction,
         created_by_username: createdByUsername
@@ -206,7 +210,7 @@ class EmiratesTransaction {
     }
   }
 
-  // Update a Emirates transaction and recalculate balances
+  // Update an Emirates transaction and recalculate balances
   static async update(id, transactionData) {
     try {
       // Get the old transaction
@@ -237,9 +241,9 @@ class EmiratesTransaction {
       // Get balance before this transaction's date (chronologically, excluding current transaction) for the same currency
       const previousBalance = await pool.query(
         `SELECT balance FROM emirates_transactions 
-         WHERE currency = $1 AND (date < $2 OR (date = $2 AND id < $3))
+         WHERE currency = ? AND (date < ? OR (date = ? AND id < ?))
          ORDER BY date DESC, id DESC LIMIT 1`,
-        [transactionCurrency, date, id]
+        [transactionCurrency, date, date, id]
       );
 
       let balanceBefore = 0;
@@ -254,10 +258,10 @@ class EmiratesTransaction {
       // Update the transaction
       const result = await pool.query(
         `UPDATE emirates_transactions 
-         SET account_number = $1, date = $2, description = $3, details = $4, currency = $5,
-             debit = $6, bank_charges = $7, credit = $8, balance = $9, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $10
-         RETURNING id, account_number, date, description, details, currency, debit, bank_charges, credit, balance, created_by, created_at, updated_at`,
+         SET account_number = ?, date = ?, description = ?, details = ?, currency = ?,
+             debit = ?, bank_charges = ?, credit = ?, balance = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+        `,
         [
           accountNumber || null,
           date,
@@ -272,17 +276,15 @@ class EmiratesTransaction {
         ]
       );
 
-      if (result.rows.length === 0) {
-        return null;
-      }
+      if (result.affectedRows === 0) return null;
 
       // Recalculate all subsequent transactions (by date, then by id) for the same currency
       const subsequentTransactions = await pool.query(
         `SELECT id, debit, bank_charges, credit 
          FROM emirates_transactions 
-         WHERE currency = $1 AND (date > $2 OR (date = $2 AND id > $3))
+         WHERE currency = ? AND (date > ? OR (date = ? AND id > ?))
          ORDER BY date ASC, id ASC`,
-        [transactionCurrency, date, id]
+        [transactionCurrency, date, date, id]
       );
 
       let currentBalance = newBalance;
@@ -291,24 +293,24 @@ class EmiratesTransaction {
         currentBalance = roundToTwoDecimals(currentBalance);
 
         await pool.query(
-          'UPDATE emirates_transactions SET balance = $1 WHERE id = $2',
+          'UPDATE emirates_transactions SET balance = ? WHERE id = ?',
           [currentBalance, txn.id]
         );
       }
 
-      // Get created_by username if created_by exists
+      const transaction = await this.getById(id);
+      if (!transaction) return null;
       let createdByUsername = null;
-      if (result.rows[0].created_by) {
+      if (transaction.created_by) {
         const userResult = await pool.query(
-          'SELECT username FROM users WHERE id = $1',
-          [result.rows[0].created_by]
+          'SELECT username FROM users WHERE id = ?',
+          [transaction.created_by]
         );
         if (userResult.rows.length > 0) {
           createdByUsername = userResult.rows[0].username;
         }
       }
 
-      const transaction = result.rows[0];
       return {
         ...transaction,
         created_by_username: createdByUsername
@@ -318,7 +320,7 @@ class EmiratesTransaction {
     }
   }
 
-  // Delete a Emirates transaction and recalculate balances
+  // Delete an Emirates transaction and recalculate balances
   static async delete(id) {
     try {
       // Get the transaction to delete
@@ -334,9 +336,9 @@ class EmiratesTransaction {
       // Get balance before this transaction (chronologically) for the same currency
       const previousBalance = await pool.query(
         `SELECT balance FROM emirates_transactions 
-         WHERE currency = $1 AND (date < $2 OR (date = $2 AND id < $3))
+         WHERE currency = ? AND (date < ? OR (date = ? AND id < ?))
          ORDER BY date DESC, id DESC LIMIT 1`,
-        [transactionCurrency, transactionDate, id]
+        [transactionCurrency, transactionDate, transactionDate, id]
       );
 
       let balanceBefore = 0;
@@ -345,15 +347,15 @@ class EmiratesTransaction {
       }
 
       // Delete the transaction
-      await pool.query('DELETE FROM emirates_transactions WHERE id = $1', [id]);
+      await pool.query('DELETE FROM emirates_transactions WHERE id = ?', [id]);
 
       // Recalculate all subsequent transactions (by date, then by id) for the same currency
       const subsequentTransactions = await pool.query(
         `SELECT id, debit, bank_charges, credit 
          FROM emirates_transactions 
-         WHERE currency = $1 AND (date > $2 OR (date = $2 AND id > $3))
+         WHERE currency = ? AND (date > ? OR (date = ? AND id > ?))
          ORDER BY date ASC, id ASC`,
-        [transactionCurrency, transactionDate, id]
+        [transactionCurrency, transactionDate, transactionDate, id]
       );
 
       let currentBalance = balanceBefore;
@@ -362,7 +364,7 @@ class EmiratesTransaction {
         currentBalance = roundToTwoDecimals(currentBalance);
 
         await pool.query(
-          'UPDATE emirates_transactions SET balance = $1 WHERE id = $2',
+          'UPDATE emirates_transactions SET balance = ? WHERE id = ?',
           [currentBalance, txn.id]
         );
       }
@@ -388,7 +390,7 @@ class EmiratesTransaction {
         const result = await pool.query(`
           SELECT id, debit, bank_charges, credit 
           FROM emirates_transactions
-          WHERE currency = $1
+          WHERE currency = ?
           ORDER BY date ASC, id ASC
         `, [currency]);
 
@@ -400,7 +402,7 @@ class EmiratesTransaction {
           runningBalance = roundToTwoDecimals(runningBalance);
 
           updates.push(
-            pool.query('UPDATE emirates_transactions SET balance = $1 WHERE id = $2', [
+            pool.query('UPDATE emirates_transactions SET balance = ? WHERE id = ?', [
               runningBalance,
               txn.id
             ])

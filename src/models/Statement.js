@@ -1,4 +1,5 @@
 const { pool } = require('../config/database');
+const { randomUUID } = require('crypto');
 
 class Statement {
   // Get all statements (optionally filter by month, card_id)
@@ -37,19 +38,17 @@ class Statement {
             c.display_order,
             c.is_active
           FROM credit_cards_new c
-          LEFT JOIN card_statements s ON c.id = s.credit_card_id AND s.statement_month = $1
-          WHERE c.is_active = TRUE
+          LEFT JOIN card_statements s ON c.id = s.credit_card_id AND s.statement_month = ?
+          WHERE c.is_active = 1
         `;
         const params = [month];
-        let paramCount = 1;
 
         if (cardId) {
-          paramCount++;
-          query += ` AND c.id = $${paramCount}`;
+          query += ` AND c.id = ?`;
           params.push(cardId);
         }
 
-        query += ` ORDER BY c.display_order ASC, COALESCE(s.statement_date, '1970-01-01'::date) ASC, c.issuing_bank ASC`;
+        query += ` ORDER BY c.display_order ASC, COALESCE(s.statement_date, '1970-01-01') ASC, c.issuing_bank ASC`;
 
         const result = await pool.query(query, params);
         return result.rows;
@@ -84,17 +83,14 @@ class Statement {
           WHERE 1=1
         `;
         const params = [];
-        let paramCount = 0;
 
         if (month) {
-          paramCount++;
-          query += ` AND s.statement_month = $${paramCount}`;
+          query += ` AND s.statement_month = ?`;
           params.push(month);
         }
 
         if (cardId) {
-          paramCount++;
-          query += ` AND s.credit_card_id = $${paramCount}`;
+          query += ` AND s.credit_card_id = ?`;
           params.push(cardId);
         }
 
@@ -139,7 +135,7 @@ class Statement {
           c.is_active
         FROM card_statements s
         INNER JOIN credit_cards_new c ON s.credit_card_id = c.id
-        WHERE s.id = $1`,
+        WHERE s.id = ?`,
         [id]
       );
 
@@ -184,7 +180,7 @@ class Statement {
           c.is_active
         FROM card_statements s
         INNER JOIN credit_cards_new c ON s.credit_card_id = c.id
-        WHERE s.credit_card_id = $1 AND s.statement_month = $2`,
+        WHERE s.credit_card_id = ? AND s.statement_month = ?`,
         [cardId, statementMonth]
       );
 
@@ -216,15 +212,14 @@ class Statement {
         paymentStatus
       } = statementData;
 
-      const result = await pool.query(
+      const id = randomUUID();
+      await pool.query(
         `INSERT INTO card_statements 
-         (credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
+         (id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
           pending_amount, epp_balance, balance_transfer, payment_status) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
-         RETURNING id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, 
-                   paid_amount, pending_amount, epp_balance, balance_transfer, payment_status, 
-                   created_at, updated_at`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+          id,
           creditCardId,
           statementMonth,
           statementDate,
@@ -240,13 +235,18 @@ class Statement {
         ]
       );
 
+      const fetchResult = await pool.query(
+        'SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, payment_status, created_at, updated_at FROM card_statements WHERE id = ?',
+        [id]
+      );
+      const statement = fetchResult.rows[0];
+      if (!statement) return null;
+
       // Get card details
       const cardResult = await pool.query(
-        'SELECT id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, is_active FROM credit_cards_new WHERE id = $1',
+        'SELECT id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, is_active FROM credit_cards_new WHERE id = ?',
         [creditCardId]
       );
-
-      const statement = result.rows[0];
       if (cardResult.rows.length > 0) {
         statement.card_id = cardResult.rows[0].id;
         statement.issuing_bank = cardResult.rows[0].issuing_bank;
@@ -259,7 +259,7 @@ class Statement {
 
       return statement;
     } catch (error) {
-      if (error.code === '23505') {
+      if (error.code === 'ER_DUP_ENTRY') {
         throw new Error('Statement already exists for this card and month');
       }
       throw error;
@@ -284,98 +284,37 @@ class Statement {
 
       const fields = [];
       const values = [];
-      let paramCount = 0;
 
-      if (statementDate !== undefined) {
-        paramCount++;
-        fields.push(`statement_date = $${paramCount}`);
-        values.push(statementDate);
-      }
+      if (statementDate !== undefined) { fields.push('statement_date = ?'); values.push(statementDate); }
+      if (dueDate !== undefined) { fields.push('due_date = ?'); values.push(dueDate); }
+      if (days !== undefined) { fields.push('days = ?'); values.push(days); }
+      if (dueMonth !== undefined) { fields.push('due_month = ?'); values.push(dueMonth); }
+      if (totalDue !== undefined) { fields.push('total_due = ?'); values.push(totalDue); }
+      if (paidAmount !== undefined) { fields.push('paid_amount = ?'); values.push(paidAmount); }
+      if (eppBalance !== undefined) { fields.push('epp_balance = ?'); values.push(eppBalance); }
+      if (balanceTransfer !== undefined) { fields.push('balance_transfer = ?'); values.push(balanceTransfer); }
+      if (pendingAmount !== undefined) { fields.push('pending_amount = ?'); values.push(pendingAmount); }
+      if (paymentStatus !== undefined) { fields.push('payment_status = ?'); values.push(paymentStatus); }
 
-      if (dueDate !== undefined) {
-        paramCount++;
-        fields.push(`due_date = $${paramCount}`);
-        values.push(dueDate);
-      }
+      if (fields.length === 0) return await this.getById(id);
 
-      if (days !== undefined) {
-        paramCount++;
-        fields.push(`days = $${paramCount}`);
-        values.push(days);
-      }
-
-      if (dueMonth !== undefined) {
-        paramCount++;
-        fields.push(`due_month = $${paramCount}`);
-        values.push(dueMonth);
-      }
-
-      if (totalDue !== undefined) {
-        paramCount++;
-        fields.push(`total_due = $${paramCount}`);
-        values.push(totalDue);
-      }
-
-      if (paidAmount !== undefined) {
-        paramCount++;
-        fields.push(`paid_amount = $${paramCount}`);
-        values.push(paidAmount);
-      }
-
-      if (eppBalance !== undefined) {
-        paramCount++;
-        fields.push(`epp_balance = $${paramCount}`);
-        values.push(eppBalance);
-      }
-
-      if (balanceTransfer !== undefined) {
-        paramCount++;
-        fields.push(`balance_transfer = $${paramCount}`);
-        values.push(balanceTransfer);
-      }
-
-      if (pendingAmount !== undefined) {
-        paramCount++;
-        fields.push(`pending_amount = $${paramCount}`);
-        values.push(pendingAmount);
-      }
-
-      if (paymentStatus !== undefined) {
-        paramCount++;
-        fields.push(`payment_status = $${paramCount}`);
-        values.push(paymentStatus);
-      }
-
-      if (fields.length === 0) {
-        return await this.getById(id);
-      }
-
-      paramCount++;
-      fields.push(`updated_at = CURRENT_TIMESTAMP`);
+      fields.push('updated_at = CURRENT_TIMESTAMP');
       values.push(id);
 
-      const query = `
-        UPDATE card_statements 
-        SET ${fields.join(', ')}
-        WHERE id = $${paramCount}
-        RETURNING id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, 
-                  paid_amount, pending_amount, epp_balance, balance_transfer, payment_status, 
-                  created_at, updated_at
-      `;
+      const updateResult = await pool.query(
+        `UPDATE card_statements SET ${fields.join(', ')} WHERE id = ?`,
+        values
+      );
+      if (updateResult.affectedRows === 0) return null;
 
-      const result = await pool.query(query, values);
-
-      if (result.rows.length === 0) {
-        return null;
-      }
+      const statement = await this.getById(id);
+      if (!statement) return null;
 
       // Get card details
       const cardResult = await pool.query(
-        'SELECT id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, is_active FROM credit_cards_new WHERE id = $1',
-        [result.rows[0].credit_card_id]
+        'SELECT id, issuing_bank, card_holder, card_number, expiry_date, credit_limit, is_active FROM credit_cards_new WHERE id = ?',
+        [statement.credit_card_id]
       );
-
-      const statement = result.rows[0];
       if (cardResult.rows.length > 0) {
         statement.card_id = cardResult.rows[0].id;
         statement.issuing_bank = cardResult.rows[0].issuing_bank;
@@ -395,15 +334,17 @@ class Statement {
   // Update calculated fields (pending_amount and payment_status)
   static async updateCalculatedFields(id, pendingAmount, paymentStatus) {
     try {
-      const result = await pool.query(
+      await pool.query(
         `UPDATE card_statements 
-         SET pending_amount = $1, payment_status = $2, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $3
-         RETURNING id, pending_amount, payment_status`,
+         SET pending_amount = ?, payment_status = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
         [pendingAmount, paymentStatus, id]
       );
-
-      return result.rows[0];
+      const result = await pool.query(
+        'SELECT id, pending_amount, payment_status FROM card_statements WHERE id = ?',
+        [id]
+      );
+      return result.rows[0] || null;
     } catch (error) {
       throw error;
     }
@@ -413,7 +354,7 @@ class Statement {
   static async exists(cardId, statementMonth) {
     try {
       const result = await pool.query(
-        'SELECT id FROM card_statements WHERE credit_card_id = $1 AND statement_month = $2',
+        'SELECT id FROM card_statements WHERE credit_card_id = ? AND statement_month = ?',
         [cardId, statementMonth]
       );
       return result.rows.length > 0;
