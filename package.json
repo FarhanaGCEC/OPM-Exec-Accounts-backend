@@ -4,6 +4,7 @@
   "description": "GCEC Account System Backend",
   "main": "src/index.js",
   "scripts": {
+    "build": "node -e \"console.log('No build step required; run yarn start to run the server.')\"",
     "start": "node src/index.js",
     "dev": "npx nodemon src/index.js",
     "db:init": "node scripts/db/init.js",
