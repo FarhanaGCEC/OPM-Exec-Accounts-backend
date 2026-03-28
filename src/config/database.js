@@ -92,6 +92,23 @@ const tableExists = async (tableName) => {
   return rows && rows.length > 0;
 };
 
+// Helper: ensure index exists (MySQL < 8.0.12 has no CREATE INDEX IF NOT EXISTS)
+const indexExists = async (tableName, indexName) => {
+  const [rows] = await mysqlPool.query(
+    `SELECT 1 FROM information_schema.statistics 
+     WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`,
+    [tableName, indexName]
+  );
+  return rows && rows.length > 0;
+};
+
+const ensureIndex = async (tableName, indexName, columnsSql) => {
+  if (await indexExists(tableName, indexName)) return;
+  await pool.query(
+    `CREATE INDEX \`${indexName}\` ON \`${tableName}\` (${columnsSql})`
+  );
+};
+
 // Fix existing card data
 const fixExistingCardData = async () => {
   try {
@@ -304,7 +321,7 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)');
+    await ensureIndex('transactions', 'idx_transactions_date', '`date`');
 
     // Create post_dated_cheques
     await pool.query(`
@@ -324,7 +341,7 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_pdc_cheque_date ON post_dated_cheques(cheque_date)');
+    await ensureIndex('post_dated_cheques', 'idx_pdc_cheque_date', 'cheque_date');
 
     // Create credit_cards_new (UUID-based)
     await pool.query(`
@@ -344,7 +361,7 @@ const initDatabase = async () => {
         CONSTRAINT chk_statement_day CHECK (statement_day >= 1 AND statement_day <= 31)
       )
     `);
-    try { await pool.query('CREATE INDEX idx_credit_cards_new_active ON credit_cards_new(is_active)'); } catch (e) { /* may exist */ }
+    await ensureIndex('credit_cards_new', 'idx_credit_cards_new_active', 'is_active');
 
     // Create credit_card_payments
     await pool.query(`
@@ -363,7 +380,7 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_cc_payment_date ON credit_card_payments(payment_date)');
+    await ensureIndex('credit_card_payments', 'idx_cc_payment_date', 'payment_date');
 
     // Create credit_cards (legacy)
     await pool.query(`
@@ -381,7 +398,7 @@ const initDatabase = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_credit_cards_is_system ON credit_cards(is_system)');
+    await ensureIndex('credit_cards', 'idx_credit_cards_is_system', 'is_system');
 
     // Create credit_card_statements
     await pool.query(`
@@ -407,8 +424,8 @@ const initDatabase = async () => {
         FOREIGN KEY (card_id) REFERENCES credit_cards(id) ON DELETE CASCADE
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_cc_statements_card_month_year ON credit_card_statements(card_id, statement_month, statement_year)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_cc_statements_month_year ON credit_card_statements(statement_month, statement_year)');
+    await ensureIndex('credit_card_statements', 'idx_cc_statements_card_month_year', 'card_id, statement_month, statement_year');
+    await ensureIndex('credit_card_statements', 'idx_cc_statements_month_year', 'statement_month, statement_year');
 
     await seedDefaultCreditCards();
 
@@ -436,9 +453,9 @@ const initDatabase = async () => {
         FOREIGN KEY (credit_card_id) REFERENCES credit_cards_new(id) ON DELETE CASCADE
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_card_statements_month ON card_statements(statement_month)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_card_statements_card_month ON card_statements(credit_card_id, statement_month)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_card_statements_status ON card_statements(payment_status)');
+    await ensureIndex('card_statements', 'idx_card_statements_month', 'statement_month');
+    await ensureIndex('card_statements', 'idx_card_statements_card_month', 'credit_card_id, statement_month');
+    await ensureIndex('card_statements', 'idx_card_statements_status', 'payment_status');
 
     await seedDefaultCreditCardsNew();
     await fixExistingCardData();
@@ -480,8 +497,8 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_usd_transactions_date ON usd_transactions(date)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_usd_transactions_account ON usd_transactions(account_number)');
+    await ensureIndex('usd_transactions', 'idx_usd_transactions_date', '`date`');
+    await ensureIndex('usd_transactions', 'idx_usd_transactions_account', 'account_number');
 
     // Create gbp_transactions
     await pool.query(`
@@ -501,8 +518,8 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_gbp_transactions_date ON gbp_transactions(date)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_gbp_transactions_account ON gbp_transactions(account_number)');
+    await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');
+    await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
 
     // Create emirates_transactions
     await pool.query(`
@@ -524,9 +541,9 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_emirates_transactions_date ON emirates_transactions(date)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_emirates_transactions_account ON emirates_transactions(account_number)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_emirates_transactions_currency ON emirates_transactions(currency)');
+    await ensureIndex('emirates_transactions', 'idx_emirates_transactions_date', '`date`');
+    await ensureIndex('emirates_transactions', 'idx_emirates_transactions_account', 'account_number');
+    await ensureIndex('emirates_transactions', 'idx_emirates_transactions_currency', 'currency');
 
     console.log('✅ Database schema initialized');
   } catch (error) {
