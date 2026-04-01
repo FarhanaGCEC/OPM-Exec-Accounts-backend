@@ -144,6 +144,9 @@ const indexExists = async (tableName, indexName) => {
   return rows && rows.length > 0;
 };
 
+
+
+
 const ensureIndex = async (tableName, indexName, columnsSql) => {
   if (await indexExists(tableName, indexName)) return;
   await pool.query(
@@ -516,6 +519,8 @@ const initDatabase = async () => {
     `);
     await ensureIndex('usd_transactions', 'idx_usd_transactions_date', '`date`');
     await ensureIndex('usd_transactions', 'idx_usd_transactions_account', 'account_number');
+    await ensureIndex('usd_transactions', 'idx_usd_transactions_date', '`date`');
+    await ensureIndex('usd_transactions', 'idx_usd_transactions_account', 'account_number');
 
     // Create gbp_transactions
     await pool.query(`
@@ -535,6 +540,8 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');
+    await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
 
