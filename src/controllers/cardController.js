@@ -4,11 +4,20 @@ class CardController {
   // GET /api/cards - List all cards (both active and inactive by default)
   static async listCards(req, res) {
     try {
-      const { active_only } = req.query;
-      // By default, show all cards (active and inactive)
-      // Only filter to active only if active_only=true is passed
-      const showActiveOnly = active_only === 'true' || active_only === '1';
-      const includeInactive = !showActiveOnly; // Include inactive unless active_only is true
+      const { active_only, include_inactive } = req.query;
+      // active_only=true → active only (wins over include_inactive)
+      // include_inactive=false → active only (per API docs)
+      // include_inactive=true → include inactive
+      // Default: include inactive (show all)
+      let showActiveOnly = false;
+      if (active_only === 'true' || active_only === '1') {
+        showActiveOnly = true;
+      } else if (include_inactive === 'false' || include_inactive === '0') {
+        showActiveOnly = true;
+      } else if (include_inactive === 'true' || include_inactive === '1') {
+        showActiveOnly = false;
+      }
+      const includeInactive = !showActiveOnly;
 
       const cards = await Card.getAll(includeInactive);
 
@@ -20,10 +29,12 @@ class CardController {
     } catch (error) {
       console.error('Error listing cards:', error);
       console.error('Error details:', error.message, error.stack);
+      const hint = error.sqlMessage || error.message;
       res.status(500).json({
         success: false,
         error: 'Failed to fetch credit cards',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        details: hint,
+        code: error.code
       });
     }
   }

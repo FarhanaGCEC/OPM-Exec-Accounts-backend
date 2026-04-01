@@ -2,32 +2,44 @@ const { pool } = require('../config/database');
 const { randomUUID } = require('crypto');
 
 class Card {
-  // Get all cards (optionally filter by is_active)
-  static async getAll(includeInactive = false) {
+  /** Prefer full card_number when both exist (some DBs used card_number_last4 only). */
+  static async _cardNumberColumnName() {
     try {
-      // Check which column name exists and use it
-      const columnCheck = await pool.query(`
-        SELECT column_name 
+      const result = await pool.query(`
+        SELECT column_name
         FROM information_schema.columns 
         WHERE table_schema = DATABASE() AND table_name = 'credit_cards_new' 
         AND column_name IN ('card_number', 'card_number_last4')
+        ORDER BY (column_name = 'card_number') DESC
         LIMIT 1
       `);
-      
-      const cardNumberColumn = columnCheck.rows.length > 0 
-       ? columnCheck.rows[0].column_name 
-        : 'card_number'; // Default to new column name
+      if (!result.rows.length) return 'card_number';
+      const row = result.rows[0];
+      const name = row.column_name ?? row.COLUMN_NAME;
+      if (name === 'card_number' || name === 'card_number_last4') return name;
+    } catch (e) {
+      // Shared hosting often blocks information_schema; /api/credit-cards still works without it.
+      console.warn('Card._cardNumberColumnName: falling back to card_number (%s)', e.message);
+    }
+    return 'card_number';
+  }
+
+  // Get all cards (optionally filter by is_active)
+  static async getAll(includeInactive = false) {
+    try {
+      const cardNumberColumn = await this._cardNumberColumnName();
 
       let query = `
         SELECT 
           id,
           issuing_bank,
           card_holder,
-          ${cardNumberColumn} as card_number,
+          \`${cardNumberColumn}\` AS card_number,
           expiry_date,
           credit_limit,
           billing_cycle_days,
           statement_day,
+          display_order,
           is_active,
           created_at,
           updated_at
@@ -51,12 +63,13 @@ class Card {
   // Get card by ID
   static async getById(id) {
     try {
+      const cardNumberColumn = await this._cardNumberColumnName();
       const result = await pool.query(
         `SELECT 
           id,
           issuing_bank,
           card_holder,
-          card_number,
+          \`${cardNumberColumn}\` AS card_number,
           expiry_date,
           credit_limit,
           billing_cycle_days,
@@ -171,8 +184,9 @@ class Card {
   // Get all active cards
   static async getActiveCards() {
     try {
+      const cardNumberColumn = await this._cardNumberColumnName();
       const result = await pool.query(
-        `SELECT id, issuing_bank, card_holder, card_number, billing_cycle_days, statement_day 
+        `SELECT id, issuing_bank, card_holder, \`${cardNumberColumn}\` AS card_number, billing_cycle_days, statement_day 
          FROM credit_cards_new 
          WHERE is_active = 1 
          ORDER BY display_order ASC, issuing_bank ASC`

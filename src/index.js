@@ -3,6 +3,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const typeIs = require('type-is');
 const authRoutes = require('./routes/auth');
 const payablesRoutes = require('./routes/payables');
 const receivablesRoutes = require('./routes/receivables');
@@ -71,8 +72,74 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+function normalizeHttpMethod(req) {
+  let m = String(req.method || 'GET').trim().toUpperCase();
+  if (!m) m = 'GET';
+  return m;
+}
+
+// Never run body-parser on GET/HEAD/OPTIONS (tools often send Content-Length + junk body).
+// If we call next() before the body is drained, keep-alive can splice bytes into the next request → JSON errors on GET.
+const jsonParser = express.json({
+  type: (req) => {
+    const m = normalizeHttpMethod(req);
+    if (['GET', 'HEAD', 'OPTIONS'].includes(m)) return false;
+    const ct = req.headers['content-type'] || '';
+    return /json|\+json|javascript/i.test(ct);
+  },
+});
+const urlencodedParser = express.urlencoded({ extended: true });
+
+app.use((req, res, next) => {
+  const m = normalizeHttpMethod(req);
+  if (['GET', 'HEAD', 'OPTIONS'].includes(m)) {
+    req.body = req.body || {};
+    if (typeIs.hasBody(req)) {
+      req.resume();
+      let forwarded = false;
+      const forward = (err) => {
+        if (forwarded) return;
+        forwarded = true;
+        next(err);
+      };
+      req.on('end', () => forward());
+      req.on('error', forward);
+      return;
+    }
+    return next();
+  }
+  jsonParser(req, res, (err) => {
+    if (err) {
+      const msg = err.message != null ? String(err.message) : String(err);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or malformed JSON body',
+        details: msg,
+        hint:
+          'Send valid JSON (e.g. {"key":"value"}), or for GET/HEAD set Body to none in Postman.',
+      });
+    }
+    next();
+  });
+});
+
+app.use((req, res, next) => {
+  const m = normalizeHttpMethod(req);
+  if (['GET', 'HEAD', 'OPTIONS'].includes(m)) {
+    return next();
+  }
+  urlencodedParser(req, res, (err) => {
+    if (err) {
+      const msg = err.message != null ? String(err.message) : String(err);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or malformed form body',
+        details: msg,
+      });
+    }
+    next();
+  });
+});
 
 // Routes
 app.get('/', (req, res) => {
@@ -136,6 +203,34 @@ app.get('/api/profile', authenticateToken, (req, res) => {
   res.json({
     message: 'This is a protected route',
     user: req.user
+  });
+});
+
+// Body-parser uses http-errors: status 400, type 'entity.parse.failed' (not always SyntaxError).
+app.use((err, req, res, next) => {
+  const msg = err && err.message != null ? String(err.message) : '';
+  const isBodyParseError =
+    err.type === 'entity.parse.failed' ||
+    (err.status === 400 &&
+      (/json|JSON|syntax|Unexpected token/i.test(msg) || err instanceof SyntaxError));
+  if (isBodyParseError) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid or malformed request body',
+      details: msg,
+      hint:
+        'Use no body on GET/HEAD. In Postman: Body → none, and remove a leftover Content-Type: application/json if you are not sending JSON.',
+    });
+  }
+  next(err);
+});
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    success: false,
+    error: err.message || 'Internal server error',
   });
 });
 

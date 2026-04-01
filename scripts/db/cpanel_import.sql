@@ -267,24 +267,28 @@ INSERT IGNORE INTO receivables_categories (name) VALUES
 ('Refund'),
 ('Other Income');
 
--- Seed legacy credit cards
-INSERT IGNORE INTO credit_cards (issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default) VALUES
-('Deem Finance', 'Suleman', '5313 9800 0593 7036', 'Feb-28', NULL, NULL, 1, 0),
-('Emirates NBD Etihad', 'Suleman', '4033 3700 5851 2427', 'Dec-29', NULL, NULL, 1, 0),
-('Mashreq Smart Saver', 'Farhana', '4198 6424 7010 9201', 'Dec-28', NULL, NULL, 1, 0),
-('CBD Smiles', 'Farhana', '4451 3530 1729 0890', 'May-28', NULL, NULL, 1, 0),
-('Mashreq Solitaire', 'Suleman', '4198 6924 7111 9303', 'Dec-26', NULL, NULL, 1, 0),
-('Sunil ENBD', 'Sunil', '5127 1710 0443 0639', 'Nov-28', NULL, NULL, 1, 0),
-('EIB Skywards Infinite', 'Farhana', '4421 0985 7539 4017', 'Dec-30', NULL, NULL, 1, 0),
-('ADCB Lulu Card', 'Farhana', '5193 0515 9143 9210', 'Nov-29', NULL, NULL, 1, 0),
-('EIB Black Card', 'Suleman', '4189 6405 0093 0001', 'Jan-31', NULL, NULL, 1, 0),
-('EIB RTA Card', 'Suleman', '4578 2888 1556 6166', 'Jun-26', NULL, NULL, 1, 0),
-('FAB World', 'Suleman', '5492 8403 0052 7218', 'Sep-30', NULL, NULL, 1, 0),
-('FAB Blue', 'Suleman', '4921 8600 4361 8557', 'Mar-28', NULL, NULL, 1, 0),
-('ADCB - Primary', 'Suleman', '5429 3374 1496 6216', 'Mar-27', NULL, NULL, 1, 1),
-('SCB Manhattan', 'Farhana', '4703 4710 0058 4834', 'Apr-27', NULL, NULL, 1, 0),
-('SCB Infinite', 'Suleman', '4444 4710 0068 5148', 'Jun-26', NULL, NULL, 1, 0),
-('FAB World', 'Farhana', '5492 8403 1836 5528', 'May-30', NULL, NULL, 1, 0),
-('SCB Manhattan', 'Suleman', '4703 4710 0005 8821', 'Sep-28', NULL, NULL, 1, 0);
+-- Seed credit_cards_new only (card master). No rows in card_statements / credit_card_statements.
+INSERT INTO credit_cards_new (id, issuing_bank, card_holder, card_number, expiry_date, billing_cycle_days, statement_day, display_order, is_active)
+SELECT v.id, v.issuing_bank, v.card_holder, v.card_number, v.expiry_date, v.billing_cycle_days, v.statement_day, v.display_order, v.is_active
+FROM (
+  SELECT UUID() AS id, 'Deem Finance' AS issuing_bank, 'Suleman' AS card_holder, '5313 9800 0593 7036' AS card_number, 'Feb-28' AS expiry_date, 21 AS billing_cycle_days, 2 AS statement_day, 1 AS display_order, 1 AS is_active UNION ALL
+  SELECT UUID(), 'Emirates NBD Etihad', 'Suleman', '4033 3700 5851 2427', 'Dec-29', 25, 2, 2, 1 UNION ALL
+  SELECT UUID(), 'Mashreq Smart Saver', 'Farhana', '4198 6424 7010 9201', 'Dec-28', 27, 2, 3, 1 UNION ALL
+  SELECT UUID(), 'CBD Smiles', 'Farhana', '4451 3530 1729 0890', 'May-28', 22, 8, 4, 1 UNION ALL
+  SELECT UUID(), 'Mashreq Solitaire', 'Suleman', '4198 6924 7111 9303', 'Dec-26', 27, 8, 5, 1 UNION ALL
+  SELECT UUID(), 'Sunil ENBD', 'Sunil', '5127 1710 0443 0639', 'Nov-28', 26, 9, 6, 1 UNION ALL
+  SELECT UUID(), 'EIB Skywards Infinite', 'Farhana', '4421 0985 7539 4017', 'Dec-30', 26, 9, 7, 1 UNION ALL
+  SELECT UUID(), 'ADCB Lulu Card', 'Farhana', '5193 0515 9143 9210', 'Nov-29', 25, 10, 8, 1 UNION ALL
+  SELECT UUID(), 'EIB Black Card', 'Suleman', '4189 6405 0093 0001', 'Jan-31', 25, 10, 9, 1 UNION ALL
+  SELECT UUID(), 'EIB RTA Card', 'Suleman', '4578 2888 1556 6166', 'Jun-26', 25, 10, 10, 1 UNION ALL
+  SELECT UUID(), 'FAB World', 'Suleman', '5492 8403 0052 7218', 'Sep-30', 25, 11, 11, 1 UNION ALL
+  SELECT UUID(), 'FAB Blue', 'Suleman', '4921 8600 4361 8557', 'Mar-28', 25, 11, 12, 1 UNION ALL
+  SELECT UUID(), 'ADCB - Primary', 'Suleman', '5429 3374 1496 6216', 'Mar-27', 25, 15, 13, 1 UNION ALL
+  SELECT UUID(), 'SCB Manhattan', 'Farhana', '4703 4710 0058 4834', 'Apr-27', 25, 19, 14, 1 UNION ALL
+  SELECT UUID(), 'SCB Infinite', 'Suleman', '4444 4710 0068 5148', 'Jun-26', 25, 19, 15, 1 UNION ALL
+  SELECT UUID(), 'FAB World', 'Farhana', '5492 8403 1836 5528', 'May-30', 25, 25, 16, 1 UNION ALL
+  SELECT UUID(), 'SCB Manhattan', 'Suleman', '4703 4710 0005 8821', 'Sep-28', 25, 26, 17, 1
+) AS v
+WHERE NOT EXISTS (SELECT 1 FROM credit_cards_new LIMIT 1);
 
 SET FOREIGN_KEY_CHECKS = 1;

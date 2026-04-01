@@ -1,9 +1,23 @@
 const mysql = require('mysql2/promise');
 
+/** Host only — not a URL (wrong: http://1.2.3.4/, right: 1.2.3.4 or mysql.example.com). */
+function normalizeDbHost(raw) {
+  if (raw == null || String(raw).trim() === '') return 'localhost';
+  let h = String(raw).trim();
+  h = h.replace(/^https?:\/\//i, '');
+  const pathStart = h.indexOf('/');
+  if (pathStart !== -1) h = h.slice(0, pathStart);
+  h = h.replace(/\/+$/, '').trim();
+  return h || 'localhost';
+}
+
+const resolvedDbHost = normalizeDbHost(process.env.DB_HOST);
+const resolvedDbPort = parseInt(process.env.DB_PORT, 10) || 3306;
+
 // Create MySQL connection pool
 const mysqlPool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT, 10) || 3306,
+  host: resolvedDbHost,
+  port: resolvedDbPort,
   database: process.env.DB_NAME || 'gcec_account_system',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
@@ -57,11 +71,39 @@ const testConnection = async () => {
     return true;
   } catch (error) {
     console.error('Database connection failed:', error.message);
-    if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === 'ECONNREFUSED') {
+    if (
+      error.code === 'ER_ACCESS_DENIED_ERROR' ||
+      error.code === 'ECONNREFUSED' ||
+      error.code === 'ENOTFOUND'
+    ) {
       console.error('\n❌ Database connection failed!');
       console.error('Please check your database credentials in the .env file.');
+      console.error(
+        `\nTarget: mysql://${process.env.DB_USER || 'root'}@${resolvedDbHost}:${resolvedDbPort}/${process.env.DB_NAME || 'gcec_account_system'}`
+      );
+      if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+        console.error(
+          "\nAccess denied: wrong DB_USER / DB_PASSWORD, or this user is not allowed to connect from your machine."
+        );
+        console.error(
+          "- If the database runs on another server (VPS/cPanel): set DB_HOST to that host/IP and in MySQL add your client IP in Remote MySQL (or use an SSH tunnel and then DB_HOST=127.0.0.1)."
+        );
+        console.error(
+          "- If MySQL is on another machine, use that host as DB_HOST (not localhost unless you use an SSH tunnel to forward port 3306)."
+        );
+      }
+      if (error.code === 'ENOTFOUND' && process.env.DB_HOST && /https?:\/\//i.test(process.env.DB_HOST)) {
+        console.error('\nTip: DB_HOST must be a hostname or IP only, not a URL.');
+        console.error('  Wrong: DB_HOST=http://165.245.188.54/');
+        console.error('  Right: DB_HOST=165.245.188.54');
+      }
+      if (error.code === 'ECONNREFUSED') {
+        console.error(
+          '\nTip: ECONNREFUSED usually means nothing is listening on that host:port (firewall, MySQL bound to 127.0.0.1 only, or use SSH tunnel / VPN).'
+        );
+      }
       console.error('\nRequired environment variables:');
-      console.error('  DB_HOST=localhost');
+      console.error('  DB_HOST=hostname_or_ip   (no http://, no trailing path)');
       console.error('  DB_PORT=3306');
       console.error('  DB_NAME=gcec_account_system');
       console.error('  DB_USER=root');
@@ -227,45 +269,6 @@ const seedDefaultCreditCardsNew = async () => {
   }
 };
 
-// Seed default credit cards (legacy)
-const seedDefaultCreditCards = async () => {
-  try {
-    const existingSystemCards = await pool.query('SELECT COUNT(*) as count FROM credit_cards WHERE is_system = 1');
-    if (parseInt(existingSystemCards.rows[0].count) === 0) {
-      const defaultCards = [
-        { issuingBank: 'Deem Finance', cardHolder: 'Suleman', cardNumber: '5313 9800 0593 7036', expiry: 'Feb-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'Emirates NBD Etihad', cardHolder: 'Suleman', cardNumber: '4033 3700 5851 2427', expiry: 'Dec-29', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'Mashreq Smart Saver', cardHolder: 'Farhana', cardNumber: '4198 6424 7010 9201', expiry: 'Dec-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'CBD Smiles', cardHolder: 'Farhana', cardNumber: '4451 3530 1729 0890', expiry: 'May-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'Mashreq Solitaire', cardHolder: 'Suleman', cardNumber: '4198 6924 7111 9303', expiry: 'Dec-26', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'Sunil ENBD', cardHolder: 'Sunil', cardNumber: '5127 1710 0443 0639', expiry: 'Nov-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'EIB Skywards Infinite', cardHolder: 'Farhana', cardNumber: '4421 0985 7539 4017', expiry: 'Dec-30', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'ADCB Lulu Card', cardHolder: 'Farhana', cardNumber: '5193 0515 9143 9210', expiry: 'Nov-29', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'EIB Black Card', cardHolder: 'Suleman', cardNumber: '4189 6405 0093 0001', expiry: 'Jan-31', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'EIB RTA Card', cardHolder: 'Suleman', cardNumber: '4578 2888 1556 6166', expiry: 'Jun-26', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'FAB World', cardHolder: 'Suleman', cardNumber: '5492 8403 0052 7218', expiry: 'Sep-30', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'FAB Blue', cardHolder: 'Suleman', cardNumber: '4921 8600 4361 8557', expiry: 'Mar-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'ADCB - Primary', cardHolder: 'Suleman', cardNumber: '5429 3374 1496 6216', expiry: 'Mar-27', cvv: null, amountLimit: null, isSystem: true, isDefault: true },
-        { issuingBank: 'SCB Manhattan', cardHolder: 'Farhana', cardNumber: '4703 4710 0058 4834', expiry: 'Apr-27', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'SCB Infinite', cardHolder: 'Suleman', cardNumber: '4444 4710 0068 5148', expiry: 'Jun-26', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'FAB World', cardHolder: 'Farhana', cardNumber: '5492 8403 1836 5528', expiry: 'May-30', cvv: null, amountLimit: null, isSystem: true, isDefault: false },
-        { issuingBank: 'SCB Manhattan', cardHolder: 'Suleman', cardNumber: '4703 4710 0005 8821', expiry: 'Sep-28', cvv: null, amountLimit: null, isSystem: true, isDefault: false }
-      ];
-
-      for (const card of defaultCards) {
-        await pool.query(
-          `INSERT INTO credit_cards (issuing_bank, card_holder, card_number, expiry, cvv, amount_limit, is_system, is_default) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [card.issuingBank, card.cardHolder, card.cardNumber, card.expiry, card.cvv, card.amountLimit, card.isSystem, card.isDefault]
-        );
-      }
-      console.log(`✅ Seeded ${defaultCards.length} default credit cards`);
-    }
-  } catch (error) {
-    console.error('Error seeding default credit cards:', error.message);
-  }
-};
-
 // Initialize database schema
 const initDatabase = async () => {
   try {
@@ -363,6 +366,20 @@ const initDatabase = async () => {
     `);
     await ensureIndex('credit_cards_new', 'idx_credit_cards_new_active', 'is_active');
 
+    // Older DBs may predate statement_day / display_order; /api/cards ORDER BY needs them.
+    if (await tableExists('credit_cards_new')) {
+      if (!(await columnExists('credit_cards_new', 'statement_day'))) {
+        await pool.query(
+          'ALTER TABLE credit_cards_new ADD COLUMN statement_day INT NOT NULL DEFAULT 1'
+        );
+      }
+      if (!(await columnExists('credit_cards_new', 'display_order'))) {
+        await pool.query(
+          'ALTER TABLE credit_cards_new ADD COLUMN display_order INT NOT NULL DEFAULT 999'
+        );
+      }
+    }
+
     // Create credit_card_payments
     await pool.query(`
       CREATE TABLE IF NOT EXISTS credit_card_payments (
@@ -427,7 +444,7 @@ const initDatabase = async () => {
     await ensureIndex('credit_card_statements', 'idx_cc_statements_card_month_year', 'card_id, statement_month, statement_year');
     await ensureIndex('credit_card_statements', 'idx_cc_statements_month_year', 'statement_month, statement_year');
 
-    await seedDefaultCreditCards();
+    // Legacy credit_cards / credit_card_statements are not auto-seeded — only credit_cards_new (card master).
 
     // Create card_statements (new system)
     await pool.query(`
