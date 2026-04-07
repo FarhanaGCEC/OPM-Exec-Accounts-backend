@@ -43,15 +43,41 @@ function formatPdcForApi(pdc) {
 
 /** Accept camelCase (API) or snake_case (mirrors DB / some clients) */
 function normalizePdcInput(body = {}) {
+  const customerName =
+    body.customerName ??
+    body.customer_name ??
+    body.customer ??
+    body.payee ??
+    body.payeeName ??
+    body.payee_name ??
+    body.partyName ??
+    body.party_name;
   return {
     chequeDate: body.chequeDate ?? body.cheque_date,
     chequeNumber: body.chequeNumber ?? body.cheque_number,
-    customerName: body.customerName ?? body.customer_name,
+    customerName,
     amount: body.amount,
     chequeType: body.chequeType ?? body.cheque_type,
     pdcType: body.pdcType ?? body.pdc_type,
-    description: body.description
+    description: body.description ?? body.description_text
   };
+}
+
+function isMissingPdcRequired(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string' && value.trim() === '') return true;
+  return false;
+}
+
+function collectMissingPdcFields({ chequeDate, chequeNumber, customerName, amount, chequeType, pdcType }) {
+  const missing = [];
+  if (isMissingPdcRequired(chequeDate)) missing.push('chequeDate');
+  if (isMissingPdcRequired(chequeNumber)) missing.push('chequeNumber');
+  if (isMissingPdcRequired(customerName)) missing.push('customerName');
+  if (amount === undefined || amount === null || amount === '') missing.push('amount');
+  if (isMissingPdcRequired(chequeType)) missing.push('chequeType');
+  if (isMissingPdcRequired(pdcType)) missing.push('pdcType');
+  return missing;
 }
 
 async function finalizePdcAttachment(req, pdcId, prevCloudinaryPublicId = null) {
@@ -371,11 +397,19 @@ router.post('/', authenticateToken, optionalPdcImageMultipart, async (req, res) 
       req.body
     );
 
-    // Validation
-    if (!chequeDate || !chequeNumber || !customerName || !amount || !chequeType || !pdcType) {
+    const missing = collectMissingPdcFields({
+      chequeDate,
+      chequeNumber,
+      customerName,
+      amount,
+      chequeType,
+      pdcType
+    });
+    if (missing.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required'
+        error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required',
+        missingFields: missing
       });
     }
 
@@ -481,10 +515,19 @@ const updatePdcHandler = async (req, res) => {
       req.body
     );
 
-    if (!chequeDate || !chequeNumber || !customerName || !amount || !chequeType || !pdcType) {
+    const missingUpdate = collectMissingPdcFields({
+      chequeDate,
+      chequeNumber,
+      customerName,
+      amount,
+      chequeType,
+      pdcType
+    });
+    if (missingUpdate.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required'
+        error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required',
+        missingFields: missingUpdate
       });
     }
 
