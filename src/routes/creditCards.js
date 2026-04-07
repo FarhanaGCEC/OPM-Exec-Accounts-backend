@@ -1,6 +1,7 @@
 const express = require('express');
 const CreditCard = require('../models/CreditCard');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 
 const router = express.Router();
 
@@ -120,7 +121,7 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // Update a credit card
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const { issuingBank, cardHolder, cardNumber, expiry, cvv, amountLimit, isDefault } = req.body;
@@ -207,7 +208,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete a credit card (only if not a system card)
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     

@@ -1,6 +1,7 @@
 const express = require('express');
 const CreditCardPayment = require('../models/CreditCardPayment');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
@@ -173,7 +174,7 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // Update a credit card payment (full update)
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks } = req.body;
@@ -280,7 +281,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 });
 
 // Partial update a credit card payment
-router.patch('/:id', authenticateToken, async (req, res) => {
+router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks } = req.body;
@@ -387,7 +388,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete a credit card payment
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await CreditCardPayment.delete(id);

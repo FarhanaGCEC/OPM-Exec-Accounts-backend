@@ -1,6 +1,11 @@
 const express = require('express');
 const StatementController = require('../controllers/statementController');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const {
+  statementPdfUploadMiddleware,
+  optionalStatementPdfMultipart
+} = require('../middleware/statementAttachmentUpload');
 
 const router = express.Router();
 
@@ -21,7 +26,13 @@ const validateMonthFormat = (req, res, next) => {
 };
 
 // POST /api/statements/init/:month - Initialize statements for a month
-router.post('/init/:month', authenticateToken, validateMonthFormat, StatementController.initializeStatements);
+router.post(
+  '/init/:month',
+  authenticateToken,
+  requireElevatedForMutation,
+  validateMonthFormat,
+  StatementController.initializeStatements
+);
 
 // GET /api/statements/detail/:id - Get single statement by ID (must come before :month to avoid route conflict)
 router.get('/detail/:id', authenticateToken, StatementController.getStatement);
@@ -30,11 +41,48 @@ router.get('/detail/:id', authenticateToken, StatementController.getStatement);
 // This must come before /:month to handle query parameter requests
 router.get('/', authenticateToken, StatementController.listStatements);
 
-// POST/PUT/PATCH /api/statements/:id - Update statement (upsert behavior)
-// These must come before GET /:month to avoid route conflicts
-router.post('/:id', authenticateToken, StatementController.updateStatement);
-router.put('/:id', authenticateToken, StatementController.updateStatement);
-router.patch('/:id', authenticateToken, StatementController.updateStatement);
+// Statement PDF attachment (before POST /:id and GET /:month)
+router.get(
+  '/:id/attachment',
+  authenticateToken,
+  StatementController.downloadStatementAttachment
+);
+router.post(
+  '/:id/attachment',
+  authenticateToken,
+  requireElevatedForMutation,
+  statementPdfUploadMiddleware,
+  StatementController.uploadStatementAttachment
+);
+router.delete(
+  '/:id/attachment',
+  authenticateToken,
+  requireElevatedForMutation,
+  StatementController.deleteStatementAttachment
+);
+
+// POST/PUT/PATCH /api/statements/:id — JSON or multipart/form-data (text fields + optional PDF `attachment`)
+router.post(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  optionalStatementPdfMultipart,
+  StatementController.updateStatement
+);
+router.put(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  optionalStatementPdfMultipart,
+  StatementController.updateStatement
+);
+router.patch(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  optionalStatementPdfMultipart,
+  StatementController.updateStatement
+);
 
 // GET /api/statements/:month - List statements for a month (or "all" for all statements)
 // This should be last as it matches any string (including UUIDs) but only for GET requests

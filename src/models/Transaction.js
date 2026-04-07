@@ -33,37 +33,41 @@ class Transaction {
     }
   }
 
+  /**
+   * @param {(sql: string, params?: any[]) => Promise<{ rows: any[] }>} queryFn
+   */
+  static async _recalculateAllBalancesQuery(queryFn) {
+    const result = await queryFn(
+      'SELECT id, type, amount FROM transactions ORDER BY date ASC, id ASC'
+    );
+
+    let runningBalance = 0;
+    const updates = [];
+
+    for (const txn of result.rows) {
+      if (txn.type === 'Debit') {
+        runningBalance = runningBalance - parseFloat(txn.amount);
+      } else if (txn.type === 'Credit') {
+        runningBalance = runningBalance + parseFloat(txn.amount);
+      }
+
+      runningBalance = roundToTwoDecimals(runningBalance);
+
+      updates.push(
+        queryFn('UPDATE transactions SET balance = ? WHERE id = ?', [runningBalance, txn.id])
+      );
+    }
+
+    await Promise.all(updates);
+    return roundToTwoDecimals(runningBalance);
+  }
+
   // Recalculate all balances chronologically (by date, then by id)
   static async recalculateAllBalances() {
     try {
-      // Get all transactions ordered by date ASC, then id ASC
-      const result = await pool.query(
-        'SELECT id, type, amount FROM transactions ORDER BY date ASC, id ASC'
+      return await this._recalculateAllBalancesQuery((sql, params = []) =>
+        pool.query(sql, params)
       );
-
-      let runningBalance = 0;
-      const updates = [];
-
-      for (const txn of result.rows) {
-        if (txn.type === 'Debit') {
-          runningBalance = runningBalance - parseFloat(txn.amount);
-        } else if (txn.type === 'Credit') {
-          runningBalance = runningBalance + parseFloat(txn.amount);
-        }
-
-        // Round balance to 2 decimal places
-        runningBalance = roundToTwoDecimals(runningBalance);
-
-        updates.push(
-          pool.query('UPDATE transactions SET balance = ? WHERE id = ?', [
-            runningBalance,
-            txn.id
-          ])
-        );
-      }
-
-      await Promise.all(updates);
-      return roundToTwoDecimals(runningBalance);
     } catch (error) {
       throw error;
     }
@@ -295,6 +299,162 @@ class Transaction {
     } catch (error) {
       throw error;
     }
+  }
+
+  /** Normalize DATE from DB or string to YYYY-MM-DD */
+  static _toYmd(d) {
+    if (d == null) return '';
+    if (d instanceof Date) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    const s = String(d);
+    return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+  }
+
+  /**
+   * Insert many transactions in chronological order (existing rows on each date first, then batch rows in request order),
+   * then recalculate all balances. Runs in one DB transaction.
+   * @param {Array<{ date: string, type: string, categoryId: number|null, paymentType: string, chequeNumber: string|null, amount: number, remarks: string|null }>} normalizedRows
+   * @param {number|null} createdBy
+   * @returns {Promise<Array<Record<string, unknown>>>} Created rows with category_name / created_by_username like create()
+   */
+  static async createMany(normalizedRows, createdBy) {
+    if (!normalizedRows.length) {
+      return [];
+    }
+
+    for (const row of normalizedRows) {
+      const { type, categoryId } = row;
+      let categoryType = null;
+      if (categoryId) {
+        if (type === 'Debit') {
+          categoryType = 'payable';
+        } else if (type === 'Credit') {
+          categoryType = 'receivable';
+        }
+      }
+
+      if (categoryId && categoryType) {
+        const tableName =
+          categoryType === 'payable' ? 'payables_categories' : 'receivables_categories';
+        const categoryResult = await pool.query(
+          `SELECT id FROM ${tableName} WHERE id = ?`,
+          [categoryId]
+        );
+        if (categoryResult.rows.length === 0) {
+          throw new Error(
+            `Category ID ${categoryId} not found in ${categoryType} categories`
+          );
+        }
+      }
+    }
+
+    const existingResult = await pool.query(
+      'SELECT id, date, type, amount FROM transactions ORDER BY date ASC, id ASC'
+    );
+    const existing = existingResult.rows;
+
+    const newByDate = new Map();
+    for (let i = 0; i < normalizedRows.length; i++) {
+      const row = normalizedRows[i];
+      const d = Transaction._toYmd(row.date);
+      if (!newByDate.has(d)) {
+        newByDate.set(d, []);
+      }
+      newByDate.get(d).push({ ...row, date: d, _batchOrder: i });
+    }
+
+    const dateSet = new Set();
+    for (const e of existing) {
+      dateSet.add(Transaction._toYmd(e.date));
+    }
+    for (const d of newByDate.keys()) {
+      dateSet.add(d);
+    }
+    const sortedDates = [...dateSet].sort();
+
+    const toInsert = [];
+    for (const date of sortedDates) {
+      const exForDate = existing.filter((e) => Transaction._toYmd(e.date) === date);
+      for (const e of exForDate) {
+        toInsert.push({
+          kind: 'existing',
+          id: e.id,
+          date
+        });
+      }
+      const batchForDate = newByDate.get(date) || [];
+      batchForDate.sort((a, b) => a._batchOrder - b._batchOrder);
+      for (const n of batchForDate) {
+        toInsert.push({
+          kind: 'new',
+          date: n.date,
+          type: n.type,
+          categoryId: n.categoryId,
+          paymentType: n.paymentType,
+          chequeNumber: n.chequeNumber,
+          amount: n.amount,
+          remarks: n.remarks
+        });
+      }
+    }
+
+    const insertedIds = [];
+    const conn = await pool.connect();
+    await conn.beginTransaction();
+    try {
+      for (const item of toInsert) {
+        if (item.kind !== 'new') continue;
+
+        const roundedAmount = roundToTwoDecimals(item.amount);
+        let categoryType = null;
+        if (item.categoryId) {
+          if (item.type === 'Debit') {
+            categoryType = 'payable';
+          } else if (item.type === 'Credit') {
+            categoryType = 'receivable';
+          }
+        }
+
+        await conn.query(
+          `INSERT INTO transactions 
+           (date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            item.date,
+            item.type,
+            item.categoryId || null,
+            categoryType,
+            item.paymentType,
+            item.chequeNumber || null,
+            roundedAmount,
+            0,
+            item.remarks || null,
+            createdBy || null
+          ]
+        );
+        const insertResult = await conn.query(
+          'SELECT id FROM transactions WHERE id = LAST_INSERT_ID()'
+        );
+        insertedIds.push(insertResult.rows[0].id);
+      }
+
+      await Transaction._recalculateAllBalancesQuery((sql, params = []) =>
+        conn.query(sql, params)
+      );
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    const details = await Promise.all(insertedIds.map((id) => this.getById(id)));
+    return details.filter(Boolean);
   }
 
   // Update a transaction and recalculate balances

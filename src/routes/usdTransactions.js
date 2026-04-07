@@ -1,6 +1,7 @@
 const express = require('express');
 const USDTransaction = require('../models/USDTransaction');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { formatAmount } = require('../utils/formatAmount');
 
 const router = express.Router();
@@ -373,13 +374,17 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
 };
 
 // Update a USD transaction (PUT - full update)
-router.put('/:id', authenticateToken, (req, res) => updateTransactionHandler(req, res, false));
+router.put('/:id', authenticateToken, requireElevatedForMutation, (req, res) =>
+  updateTransactionHandler(req, res, false)
+);
 
 // Update a USD transaction (PATCH - partial update)
-router.patch('/:id', authenticateToken, (req, res) => updateTransactionHandler(req, res, true));
+router.patch('/:id', authenticateToken, requireElevatedForMutation, (req, res) =>
+  updateTransactionHandler(req, res, true)
+);
 
 // Delete a USD transaction
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await USDTransaction.delete(id);
@@ -405,7 +410,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 // Recalculate all balances (useful for fixing incorrect balances)
-router.post('/recalculate-balances', authenticateToken, async (req, res) => {
+router.post('/recalculate-balances', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const finalBalance = await USDTransaction.recalculateAllBalances();
     

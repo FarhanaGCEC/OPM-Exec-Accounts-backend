@@ -31,6 +31,59 @@ class PayablesCategory {
     }
   }
 
+  /**
+   * Bulk insert category names. Trims, removes empties, dedupes by first occurrence order.
+   * Uses INSERT IGNORE so existing DB names are skipped (not an error).
+   * @param {string[]} names
+   * @returns {Promise<{ created: object[], skippedDuplicates: string[] }>}
+   */
+  static async createMany(names) {
+    const trimmed = names
+      .map((n) => String(n ?? '').trim())
+      .filter((n) => n.length > 0);
+    const seen = new Set();
+    const uniqueInOrder = [];
+    for (const n of trimmed) {
+      const key = n.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniqueInOrder.push(n);
+    }
+
+    if (uniqueInOrder.length === 0) {
+      return { created: [], skippedDuplicates: [] };
+    }
+
+    const conn = await pool.connect();
+    await conn.beginTransaction();
+    const created = [];
+    const skippedDuplicates = [];
+    try {
+      for (const name of uniqueInOrder) {
+        const ins = await conn.query(
+          'INSERT IGNORE INTO payables_categories (name) VALUES (?)',
+          [name]
+        );
+        if (ins.affectedRows > 0) {
+          const row = await conn.query(
+            'SELECT id, name, created_at, updated_at FROM payables_categories WHERE id = LAST_INSERT_ID()'
+          );
+          created.push(row.rows[0]);
+        } else {
+          skippedDuplicates.push(name);
+        }
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    return { created, skippedDuplicates };
+  }
+
   // Create a new payables category
   static async create(name) {
     try {

@@ -5,6 +5,9 @@ const express = require('express');
 const cors = require('cors');
 const typeIs = require('type-is');
 const authRoutes = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
+const accountantRoutes = require('./routes/accountant');
+const userRoutes = require('./routes/user');
 const payablesRoutes = require('./routes/payables');
 const receivablesRoutes = require('./routes/receivables');
 const categoriesRoutes = require('./routes/categories');
@@ -21,6 +24,9 @@ const usdTransactionsRoutes = require('./routes/usdTransactions');
 const gbpTransactionsRoutes = require('./routes/gbpTransactions');
 const fkEmiratesRoutes = require('./routes/fkEmirates');
 const { authenticateToken } = require('./middleware/auth');
+const { authorizeRoles } = require('./middleware/authorizeRoles');
+const { USER_ROLES } = require('./constants/roles');
+const adminController = require('./controllers/adminController');
 const { initDatabase } = require('./config/database');
 
 const app = express();
@@ -152,6 +158,17 @@ app.get('/health', (req, res) => {
 
 // Authentication routes
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/accountant', accountantRoutes);
+app.use('/api/user', userRoutes);
+
+// Same as GET /api/admin/users — handy if the frontend calls /api/users
+app.get(
+  '/api/users',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN),
+  adminController.listUsers
+);
 
 // Payables categories routes (protected)
 app.use('/api/payables', payablesRoutes);
@@ -197,14 +214,6 @@ app.use('/api/analytics', analyticsRoutes);
 
 // Account Summary routes (protected)
 app.use('/api/account-summary', accountSummaryRoutes);
-
-// Protected route example
-app.get('/api/profile', authenticateToken, (req, res) => {
-  res.json({
-    message: 'This is a protected route',
-    user: req.user
-  });
-});
 
 // Body-parser uses http-errors: status 400, type 'entity.parse.failed' (not always SyntaxError).
 app.use((err, req, res, next) => {

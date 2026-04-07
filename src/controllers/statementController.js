@@ -1,7 +1,95 @@
+const path = require('path');
+const fsSync = require('fs');
+const fs = require('fs').promises;
 const Statement = require('../models/Statement');
 const Card = require('../models/Card');
 const StatementService = require('../services/statementService');
 const { formatAmount } = require('../utils/formatAmount');
+const {
+  uploadStatementPdf,
+  destroyStatementPdf,
+  isCloudinaryConfigured
+} = require('../services/cloudinaryStatementUpload');
+
+/** Older attachments saved on disk before Cloudinary */
+const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
+
+async function resolveStatementForAttachment(id, month) {
+  if (month) {
+    return Statement.getByCardIdAndMonth(id, month);
+  }
+  return Statement.getById(id);
+}
+
+const buildAttachmentPayload = (row) => {
+  if (!row || !row.id) return null;
+  if (row.attachment_url) {
+    return {
+      name: row.attachment_name || 'statement.pdf',
+      url: row.attachment_url
+    };
+  }
+  if (row.attachment_storage_key) {
+    return {
+      name: row.attachment_name || 'statement.pdf',
+      url: `/api/statements/${row.id}/attachment`
+    };
+  }
+  return null;
+};
+
+/** UI may echo GET list values: "12,345.67" → number */
+function normalizeStatementAmount(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === 'number' && !Number.isNaN(raw)) return raw;
+  const n = parseFloat(String(raw).replace(/,/g, '').trim());
+  return Number.isNaN(n) ? NaN : n;
+}
+
+/**
+ * Accept YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YY (same pattern as list formatDateDDMMYY)
+ */
+function parseStatementDateInput(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: false, value: null };
+  const s = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const d = new Date(`${s}T12:00:00`);
+    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: s };
+  }
+  if (s.includes('/')) {
+    const parts = s.split('/').map((p) => p.trim());
+    if (parts.length !== 3) return { ok: false, value: null };
+    const [a, b, c] = parts;
+    let y;
+    let mo;
+    let day;
+    if (c.length === 4) {
+      day = a.padStart(2, '0');
+      mo = b.padStart(2, '0');
+      y = c;
+    } else {
+      day = a.padStart(2, '0');
+      mo = b.padStart(2, '0');
+      y = c.length === 2 ? (parseInt(c, 10) >= 70 ? `19${c}` : `20${c}`) : c;
+    }
+    const iso = `${y}-${mo}-${day}`;
+    const d = new Date(`${iso}T12:00:00`);
+    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: iso };
+  }
+  const m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (m) {
+    const day = m[1].padStart(2, '0');
+    const mo = m[2].padStart(2, '0');
+    let y = m[3];
+    if (y.length === 2) {
+      y = parseInt(y, 10) >= 70 ? `19${y}` : `20${y}`;
+    }
+    const iso = `${y}-${mo}-${day}`;
+    const d = new Date(`${iso}T12:00:00`);
+    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: iso };
+  }
+  return { ok: false, value: null };
+}
 
 // Helper function to format date as DD-MM-YY
 const formatDateDDMMYY = (dateString) => {
@@ -23,6 +111,60 @@ const getMonthAbbreviation = (dateString) => {
                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   return monthNames[date.getMonth()];
 };
+
+/**
+ * If req.file is present (PDF), upload to Cloudinary and save on statement `row.id`.
+ */
+async function applyStatementPdfWithRow(req, row) {
+  if (!req.file) {
+    return { ok: true };
+  }
+  if (!isCloudinaryConfigured()) {
+    return {
+      ok: false,
+      status: 503,
+      error:
+        'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+    };
+  }
+  const statementId = row.id;
+  const prevCloudinaryId = row.attachment_cloudinary_public_id;
+  const prevStorageKey = row.attachment_storage_key;
+  const originalName = (req.file.originalname || 'statement.pdf').slice(0, 512);
+  let uploaded;
+  try {
+    uploaded = await uploadStatementPdf({
+      buffer: req.file.buffer,
+      statementId,
+      originalFilename: originalName
+    });
+  } catch (e) {
+    console.error('Cloudinary statement PDF upload error:', e);
+    return {
+      ok: false,
+      status: 502,
+      error: e.message || 'Failed to upload PDF to Cloudinary'
+    };
+  }
+  await Statement.update(statementId, {
+    attachmentName: originalName,
+    attachmentUrl: uploaded.secure_url,
+    attachmentCloudinaryPublicId: uploaded.public_id,
+    attachmentStorageKey: null
+  });
+  if (prevCloudinaryId && prevCloudinaryId !== uploaded.public_id) {
+    await destroyStatementPdf(prevCloudinaryId);
+  }
+  if (prevStorageKey) {
+    const prevPath = path.join(LEGACY_UPLOAD_DIR, prevStorageKey);
+    try {
+      await fs.unlink(prevPath);
+    } catch (e) {
+      if (e.code !== 'ENOENT') console.error('Failed to remove previous statement PDF:', e.message);
+    }
+  }
+  return { ok: true };
+}
 
 class StatementController {
   // POST /api/statements/init/:month - Initialize statements for a month
@@ -293,7 +435,8 @@ class StatementController {
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
           payment_status: row.payment_status || 'PARTIAL',
           created_at: row.created_at || null,
-          updated_at: row.updated_at || null
+          updated_at: row.updated_at || null,
+          attachment: buildAttachmentPayload(row)
         };
         return formatted;
       });
@@ -330,84 +473,86 @@ class StatementController {
     try {
       const { id } = req.params;
       const { month } = req.query;
-      const { 
-        statement_date, 
-        due_date,
-        due_month,
-        // Backend format (preferred)
-        total_due, 
-        paid_amount, 
-        epp_balance, 
-        balance_transfer,
-        // Frontend format (also supported)
-        total_payment_due,
-        paid,
-        epp
-      } = req.body;
-      
-      // Normalize field names - support both frontend and backend formats
-      const finalTotalDue = total_due !== undefined ? total_due : total_payment_due;
-      const finalPaidAmount = paid_amount !== undefined ? paid_amount : paid;
-      const finalEppBalance = epp_balance !== undefined ? epp_balance : epp;
+      const b = req.body || {};
+      const statement_date = b.statement_date !== undefined ? b.statement_date : b.statementDate;
+      const due_date = b.due_date !== undefined ? b.due_date : b.dueDate;
+      const due_month = b.due_month !== undefined ? b.due_month : b.dueMonth;
+      const total_due = b.total_due !== undefined ? b.total_due : b.totalDue;
+      const paid_amount = b.paid_amount !== undefined ? b.paid_amount : b.paidAmount;
+      const epp_balance = b.epp_balance !== undefined ? b.epp_balance : b.eppBalance;
+      const balance_transfer =
+        b.balance_transfer !== undefined ? b.balance_transfer : b.balanceTransfer;
+      const total_payment_due = b.total_payment_due !== undefined ? b.total_payment_due : b.totalPaymentDue;
+      const paid = b.paid;
+      const epp = b.epp;
 
-      // Validate dates if provided
-      if (statement_date) {
-        const stmtDate = new Date(statement_date);
-        if (isNaN(stmtDate.getTime())) {
+      let normTotalDue = total_due !== undefined ? total_due : total_payment_due;
+      let normPaidAmount = paid_amount !== undefined ? paid_amount : paid;
+      let normEppBalance = epp_balance !== undefined ? epp_balance : epp;
+
+      let parsedStatementDate = undefined;
+      if (statement_date !== undefined) {
+        const p = parseStatementDateInput(statement_date);
+        if (!p.ok) {
           return res.status(400).json({
             success: false,
-            error: 'Invalid statement_date format. Expected YYYY-MM-DD'
+            error:
+              'Invalid statement_date. Use YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YY (GET list returns DD-MM-YY).'
+          });
+        }
+        parsedStatementDate = p.value;
+      }
+
+      let parsedDueDate = undefined;
+      if (due_date !== undefined) {
+        const p = parseStatementDateInput(due_date);
+        if (!p.ok) {
+          return res.status(400).json({
+            success: false,
+            error:
+              'Invalid due_date. Use YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YY (GET list returns DD-MM-YY).'
+          });
+        }
+        parsedDueDate = p.value;
+      }
+
+      if (normTotalDue !== undefined) {
+        normTotalDue = normalizeStatementAmount(normTotalDue);
+        if (Number.isNaN(normTotalDue) || normTotalDue < 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'total_due/total_payment_due must be a valid number >= 0 (comma separators allowed)'
           });
         }
       }
 
-      if (due_date) {
-        const dueDate = new Date(due_date);
-        if (isNaN(dueDate.getTime())) {
+      if (normPaidAmount !== undefined) {
+        normPaidAmount = normalizeStatementAmount(normPaidAmount);
+        if (Number.isNaN(normPaidAmount) || normPaidAmount < 0) {
           return res.status(400).json({
             success: false,
-            error: 'Invalid due_date format. Expected YYYY-MM-DD'
+            error: 'paid_amount/paid must be a valid number >= 0 (comma separators allowed)'
           });
         }
       }
 
-      // Validate numeric fields if provided (using normalized values)
-      if (finalTotalDue !== undefined) {
-        const total = parseFloat(finalTotalDue);
-        if (isNaN(total) || total < 0) {
+      if (normEppBalance !== undefined) {
+        normEppBalance = normalizeStatementAmount(normEppBalance);
+        if (Number.isNaN(normEppBalance) || normEppBalance < 0) {
           return res.status(400).json({
             success: false,
-            error: 'total_due/total_payment_due must be a valid number >= 0'
+            error: 'epp_balance/epp must be a valid number >= 0 (comma separators allowed)'
           });
         }
       }
 
-      if (finalPaidAmount !== undefined) {
-        const paid = parseFloat(finalPaidAmount);
-        if (isNaN(paid) || paid < 0) {
-          return res.status(400).json({
-            success: false,
-            error: 'paid_amount/paid must be a valid number >= 0'
-          });
-        }
-      }
-
-      if (finalEppBalance !== undefined) {
-        const epp = parseFloat(finalEppBalance);
-        if (isNaN(epp) || epp < 0) {
-          return res.status(400).json({
-            success: false,
-            error: 'epp_balance/epp must be a valid number >= 0'
-          });
-        }
-      }
-
+      let normBalanceTransfer = undefined;
       if (balance_transfer !== undefined) {
-        const bt = parseFloat(balance_transfer);
-        if (isNaN(bt) || bt < 0) {
+        normBalanceTransfer = normalizeStatementAmount(balance_transfer);
+        if (Number.isNaN(normBalanceTransfer) || normBalanceTransfer < 0) {
           return res.status(400).json({
             success: false,
-            error: 'balance_transfer must be a valid number >= 0'
+            error: 'balance_transfer must be a valid number >= 0 (comma separators allowed)'
           });
         }
       }
@@ -465,14 +610,13 @@ class StatementController {
                            'July', 'August', 'September', 'October', 'November', 'December'];
         const dueMonthStr = `${monthNames[parseInt(dueMonth) - 1]} ${dueYear}`;
         
-        // Use provided dates if available, otherwise use calculated defaults
-        const finalStatementDate = statement_date || defaultStatementDate;
-        const finalDueDate = due_date || defaultDueDate;
-        
-        // Calculate initial values
-        const initTotalDue = finalTotalDue !== undefined ? parseFloat(finalTotalDue) : 0;
-        const initPaidAmount = finalPaidAmount !== undefined ? parseFloat(finalPaidAmount) : 0;
-        const initEppBalance = finalEppBalance !== undefined ? parseFloat(finalEppBalance) : 0;
+        const finalStatementDate =
+          parsedStatementDate !== undefined ? parsedStatementDate : defaultStatementDate;
+        const finalDueDate = parsedDueDate !== undefined ? parsedDueDate : defaultDueDate;
+
+        const initTotalDue = normTotalDue !== undefined ? normTotalDue : 0;
+        const initPaidAmount = normPaidAmount !== undefined ? normPaidAmount : 0;
+        const initEppBalance = normEppBalance !== undefined ? normEppBalance : 0;
         
         // Calculate pending_amount
         const initPendingAmount = StatementService.calculatePendingAmount(initTotalDue, initPaidAmount, initEppBalance);
@@ -491,7 +635,7 @@ class StatementController {
           totalDue: initTotalDue,
           paidAmount: initPaidAmount,
           eppBalance: initEppBalance,
-          balanceTransfer: balance_transfer !== undefined ? parseFloat(balance_transfer) : 0,
+          balanceTransfer: normBalanceTransfer !== undefined ? normBalanceTransfer : 0,
           pendingAmount: initPendingAmount,
           paymentStatus: initPaymentStatus
         });
@@ -511,9 +655,12 @@ class StatementController {
 
       // Calculate final values for validation (use normalized provided values or existing)
       // Note: existingStatement is guaranteed to exist at this point (either found or auto-created)
-      const validationTotalDue = finalTotalDue !== undefined ? parseFloat(finalTotalDue) : parseFloat(existingStatement.total_due || 0);
-      const validationPaidAmount = finalPaidAmount !== undefined ? parseFloat(finalPaidAmount) : parseFloat(existingStatement.paid_amount || 0);
-      const validationEppBalance = finalEppBalance !== undefined ? parseFloat(finalEppBalance) : parseFloat(existingStatement.epp_balance || 0);
+      const validationTotalDue =
+        normTotalDue !== undefined ? normTotalDue : parseFloat(existingStatement.total_due || 0);
+      const validationPaidAmount =
+        normPaidAmount !== undefined ? normPaidAmount : parseFloat(existingStatement.paid_amount || 0);
+      const validationEppBalance =
+        normEppBalance !== undefined ? normEppBalance : parseFloat(existingStatement.epp_balance || 0);
 
       // Validate that paid_amount + epp_balance doesn't exceed total_due
       if (validationPaidAmount + validationEppBalance > validationTotalDue) {
@@ -523,17 +670,27 @@ class StatementController {
         });
       }
 
-      // Build update data using normalized field names
       const updateData = {};
-      if (statement_date !== undefined) updateData.statement_date = statement_date;
-      if (due_date !== undefined) updateData.due_date = due_date;
+      if (parsedStatementDate !== undefined) updateData.statement_date = parsedStatementDate;
+      if (parsedDueDate !== undefined) updateData.due_date = parsedDueDate;
       if (due_month !== undefined) updateData.due_month = due_month;
-      if (finalTotalDue !== undefined) updateData.total_due = finalTotalDue;
-      if (finalPaidAmount !== undefined) updateData.paid_amount = finalPaidAmount;
-      if (finalEppBalance !== undefined) updateData.epp_balance = finalEppBalance;
-      if (balance_transfer !== undefined) updateData.balance_transfer = balance_transfer;
+      if (normTotalDue !== undefined) updateData.total_due = normTotalDue;
+      if (normPaidAmount !== undefined) updateData.paid_amount = normPaidAmount;
+      if (normEppBalance !== undefined) updateData.epp_balance = normEppBalance;
+      if (normBalanceTransfer !== undefined) updateData.balance_transfer = normBalanceTransfer;
 
-      const statement = await StatementService.updateStatement(statementId, updateData);
+      let statement = await StatementService.updateStatement(statementId, updateData);
+
+      if (req.file) {
+        const pdfResult = await applyStatementPdfWithRow(req, statement);
+        if (!pdfResult.ok) {
+          return res.status(pdfResult.status).json({
+            success: false,
+            error: pdfResult.error
+          });
+        }
+        statement = await Statement.getById(statementId);
+      }
 
       // Format amounts and dates for display
       let formattedDueMonth = statement.due_month;
@@ -574,7 +731,8 @@ class StatementController {
         balance_transfer: formatAmount(statement.balance_transfer),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
-        updated_at: statement.updated_at
+        updated_at: statement.updated_at,
+        attachment: buildAttachmentPayload(statement)
       };
 
       res.json({
@@ -735,7 +893,8 @@ class StatementController {
         balance_transfer: formatAmount(statement.balance_transfer),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
-        updated_at: statement.updated_at
+        updated_at: statement.updated_at,
+        attachment: buildAttachmentPayload(statement)
       };
 
       res.json({
@@ -747,6 +906,233 @@ class StatementController {
       res.status(500).json({
         success: false,
         error: 'Failed to fetch statement'
+      });
+    }
+  }
+
+  /**
+   * POST /api/statements/:id/attachment — multipart field `attachment` (PDF).
+   * Optional query: ?month=YYYY-MM when :id is credit_card_id.
+   */
+  static async uploadStatementAttachment(req, res) {
+    try {
+      if (!isCloudinaryConfigured()) {
+        return res.status(503).json({
+          success: false,
+          error:
+            'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing PDF file: send multipart field "attachment"'
+        });
+      }
+
+      const { id } = req.params;
+      const { month } = req.query;
+      const existing = await resolveStatementForAttachment(id, month);
+
+      if (!existing) {
+        return res.status(404).json({
+          success: false,
+          error: month
+            ? 'Statement not found for this card and month'
+            : 'Statement not found'
+        });
+      }
+
+      const pdfResult = await applyStatementPdfWithRow(req, existing);
+      if (!pdfResult.ok) {
+        return res.status(pdfResult.status).json({
+          success: false,
+          error: pdfResult.error
+        });
+      }
+
+      const statement = await Statement.getById(existing.id);
+
+      let formattedDueMonth = statement.due_month;
+      if (!formattedDueMonth || (typeof formattedDueMonth === 'number')) {
+        formattedDueMonth = statement.due_date ? getMonthAbbreviation(statement.due_date) : null;
+      } else if (typeof formattedDueMonth === 'string' && formattedDueMonth.length > 3) {
+        const monthNamesFull = ['January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December'];
+        const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const monthIndex = monthNamesFull.findIndex(m => formattedDueMonth.includes(m));
+        formattedDueMonth = monthIndex !== -1 ? monthNamesShort[monthIndex] : (statement.due_date ? getMonthAbbreviation(statement.due_date) : null);
+      }
+
+      const formattedStatement = {
+        issuing_bank: statement.issuing_bank,
+        card_holder: statement.card_holder,
+        card_number: statement.card_number,
+        id: statement.id,
+        card_id: statement.card_id || statement.credit_card_id,
+        credit_card_id: statement.credit_card_id,
+        statement_id: statement.id,
+        statement_month: statement.statement_month,
+        statement_date: formatDateDDMMYY(statement.statement_date),
+        due_date: formatDateDDMMYY(statement.due_date),
+        days: statement.days,
+        due_month: formattedDueMonth,
+        total_payment_due: formatAmount(statement.total_due),
+        paid: formatAmount(statement.paid_amount),
+        epp: formatAmount(statement.epp_balance),
+        amount_pending: formatAmount(statement.pending_amount),
+        balance_transfer: formatAmount(statement.balance_transfer),
+        payment_status: statement.payment_status,
+        created_at: statement.created_at,
+        updated_at: statement.updated_at,
+        attachment: buildAttachmentPayload(statement)
+      };
+
+      res.json({
+        success: true,
+        message: 'Statement PDF attached',
+        data: formattedStatement
+      });
+    } catch (error) {
+      console.error('Error attaching statement PDF:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to attach PDF'
+      });
+    }
+  }
+
+  /**
+   * GET /api/statements/:id/attachment — download stored PDF (auth required).
+   * Optional query: ?month=YYYY-MM when :id is credit_card_id.
+   */
+  static async downloadStatementAttachment(req, res) {
+    try {
+      const { id } = req.params;
+      const { month } = req.query;
+      const row = await resolveStatementForAttachment(id, month);
+
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          error: month ? 'Statement not found for this card and month' : 'Statement not found'
+        });
+      }
+
+      if (row.attachment_url) {
+        return res.redirect(302, row.attachment_url);
+      }
+
+      if (!row.attachment_storage_key) {
+        return res.status(404).json({
+          success: false,
+          error: 'No PDF attached to this statement'
+        });
+      }
+
+      const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);
+      if (!fsSync.existsSync(absPath)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Attachment file missing on server'
+        });
+      }
+
+      const downloadName = row.attachment_name || 'statement.pdf';
+      res.download(absPath, downloadName, (err) => {
+        if (err && !res.headersSent) {
+          console.error('Error sending statement PDF:', err.message);
+          res.status(500).json({ success: false, error: 'Failed to download file' });
+        }
+      });
+    } catch (error) {
+      console.error('Error downloading statement PDF:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to download attachment'
+      });
+    }
+  }
+
+  /**
+   * DELETE /api/statements/:id/attachment — remove stored PDF (DB + Cloudinary or legacy file).
+   * Optional query: ?month=YYYY-MM when :id is credit_card_id.
+   */
+  static async deleteStatementAttachment(req, res) {
+    try {
+      const { id } = req.params;
+      const { month } = req.query;
+      const row = await resolveStatementForAttachment(id, month);
+
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          error: month
+            ? 'Statement not found for this card and month'
+            : 'Statement not found'
+        });
+      }
+
+      const hasAttachment =
+        row.attachment_cloudinary_public_id ||
+        row.attachment_storage_key ||
+        row.attachment_url;
+
+      if (!hasAttachment) {
+        const statement = await Statement.getById(row.id);
+        return res.json({
+          success: true,
+          message: 'No attachment on this statement',
+          data: {
+            id: statement.id,
+            card_id: statement.card_id || statement.credit_card_id,
+            credit_card_id: statement.credit_card_id,
+            statement_month: statement.statement_month,
+            attachment: buildAttachmentPayload(statement)
+          }
+        });
+      }
+
+      if (row.attachment_cloudinary_public_id && isCloudinaryConfigured()) {
+        await destroyStatementPdf(row.attachment_cloudinary_public_id);
+      }
+      if (row.attachment_storage_key) {
+        const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);
+        try {
+          await fs.unlink(absPath);
+        } catch (e) {
+          if (e.code !== 'ENOENT') {
+            console.error('Failed to remove statement PDF file:', e.message);
+          }
+        }
+      }
+
+      await Statement.update(row.id, {
+        attachmentName: null,
+        attachmentStorageKey: null,
+        attachmentUrl: null,
+        attachmentCloudinaryPublicId: null
+      });
+
+      const statement = await Statement.getById(row.id);
+      res.json({
+        success: true,
+        message: 'Statement attachment removed',
+        data: {
+          id: statement.id,
+          card_id: statement.card_id || statement.credit_card_id,
+          credit_card_id: statement.credit_card_id,
+          statement_month: statement.statement_month,
+          attachment: buildAttachmentPayload(statement)
+        }
+      });
+    } catch (error) {
+      console.error('Error removing statement PDF:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to remove attachment'
       });
     }
   }

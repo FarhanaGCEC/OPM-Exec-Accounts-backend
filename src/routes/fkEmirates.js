@@ -1,6 +1,7 @@
 const express = require('express');
 const EmiratesTransaction = require('../models/EmiratesTransaction');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { formatAmount } = require('../utils/formatAmount');
 
 const router = express.Router();
@@ -406,13 +407,17 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
 };
 
 // Update a Emirates transaction (PUT - full update)
-router.put('/:id', authenticateToken, (req, res) => updateTransactionHandler(req, res, false));
+router.put('/:id', authenticateToken, requireElevatedForMutation, (req, res) =>
+  updateTransactionHandler(req, res, false)
+);
 
 // Update a Emirates transaction (PATCH - partial update)
-router.patch('/:id', authenticateToken, (req, res) => updateTransactionHandler(req, res, true));
+router.patch('/:id', authenticateToken, requireElevatedForMutation, (req, res) =>
+  updateTransactionHandler(req, res, true)
+);
 
 // Delete a Emirates transaction
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await EmiratesTransaction.delete(id);
@@ -438,7 +443,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 // Recalculate all balances (useful for fixing incorrect balances)
-router.post('/recalculate-balances', authenticateToken, async (req, res) => {
+router.post('/recalculate-balances', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const finalBalances = await EmiratesTransaction.recalculateAllBalances();
     

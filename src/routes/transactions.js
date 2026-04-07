@@ -1,39 +1,173 @@
 const express = require('express');
 const Transaction = require('../models/Transaction');
-const PDC = require('../models/PDC');
-const PurchaseBill = require('../models/PurchaseBill');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const { pool } = require('../config/database');
+const {
+  isGcecPdcType,
+  isCustomerPdcType,
+  parseDailyLedgerApproved
+} = require('../utils/pdcLedgerApproval');
 
 const router = express.Router();
+
+/** Normalize DB/JS dates to YYYY-MM-DD for sorting and comparison */
+function toYmd(d) {
+  if (d == null) return '';
+  if (d instanceof Date) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  const s = String(d);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+}
+
+/**
+ * Post-dated cheques that have matured (cheque_date <= today) — shown as Daily Transaction rows.
+ * Optional startDate/endDate filter on cheque_date (for /all); omit for full history on GET /.
+ */
+async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
+  const conditions = [
+    'pdc.cheque_date <= CURDATE()',
+    "pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC')"
+  ];
+  const params = [];
+  if (startDate) {
+    conditions.push('pdc.cheque_date >= ?');
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push('pdc.cheque_date <= ?');
+    params.push(endDate);
+  }
+  const r = await pool.query(
+    `
+    SELECT
+      pdc.id,
+      DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') AS cheque_date_ymd,
+      COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
+      pdc.cheque_number,
+      pdc.customer_name,
+      pdc.amount,
+      pdc.cheque_type,
+      pdc.pdc_type,
+      pdc.description,
+      pdc.created_by,
+      u.username AS created_by_username,
+      pdc.created_at
+    FROM post_dated_cheques pdc
+    LEFT JOIN users u ON pdc.created_by = u.id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY pdc.cheque_date ASC, pdc.created_at ASC, pdc.id ASC
+    `,
+    params
+  );
+  return r.rows;
+}
+
+function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
+  const isCredit = isCustomerPdcType(pdc.pdc_type);
+  const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
+  const remarks =
+    pdc.description && String(pdc.description).trim()
+      ? `${pdc.pdc_type}, ${String(pdc.description).trim()}`
+      : pdc.pdc_type;
+  const ledgerApprovalRequired = isGcecPdcType(pdc.pdc_type);
+  const ledgerApproved = ledgerApprovalRequired
+    ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
+    : true;
+  const base = {
+    id: `pdc-due-${pdc.id}`,
+    date: rowDate,
+    category: pdc.customer_name || '-',
+    paymentType: 'cheque',
+    chequeNumber: pdc.cheque_number || '-',
+    debit: isCredit ? null : formatAmount(pdc.amount),
+    credit: isCredit ? formatAmount(pdc.amount) : null,
+    balance: null,
+    remarks,
+    createdBy: pdc.created_by,
+    createdByUsername: pdc.created_by_username || null,
+    createdAt: pdc.created_at,
+    pdcId: pdc.id,
+    pdcType: pdc.pdc_type,
+    syntheticFromPdc: true,
+    ledgerApprovalRequired,
+    ledgerApproved,
+    showLedgerApprovalCheckbox: ledgerApprovalRequired && !ledgerApproved,
+    /** Explicit flag for UI — use this or showLedgerApprovalCheckbox (do not rely on remarks text alone) */
+    pendingGcecLedgerApproval: ledgerApprovalRequired && !ledgerApproved,
+    /** When true, UI may clone this row at table end (no date on clone); backend sends this row once only */
+    ledgerApprovalFooterDuplicateForUi: ledgerApprovalRequired && !ledgerApproved
+  };
+  if (transactionType) {
+    return { ...base, transactionType };
+  }
+  return base;
+}
+
+function sortMergedByDateThenId(rows) {
+  return [...rows].sort((a, b) => {
+    const da = toYmd(a.date);
+    const db = toYmd(b.date);
+    if (da !== db) return da.localeCompare(db);
+    const ida = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
+    const idb = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
+    if (ida !== idb) return ida - idb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
+
+/**
+ * Running balance for merged list (DB transactions + synthetic PDC). Same rules as Transaction.recalculateAllBalances.
+ * Mutates each row's `balance`. Includes normal rows (bounced/returned cheques, etc.) when they exist as ledger transactions.
+ */
+async function applyRunningBalancesToMainRows(mainRows) {
+  if (!mainRows.length) return;
+  const firstYmd = toYmd(mainRows[0].date);
+  let running = await Transaction.getBalanceBeforeDate(firstYmd);
+  for (const row of mainRows) {
+    let debitAmt = 0;
+    let creditAmt = 0;
+    if (row.debit != null && row.debit !== '') {
+      const x = parseFloat(String(row.debit));
+      if (!Number.isNaN(x) && x > 0) debitAmt = x;
+    }
+    if (row.credit != null && row.credit !== '') {
+      const x = parseFloat(String(row.credit));
+      if (!Number.isNaN(x) && x > 0) creditAmt = x;
+    }
+    if (debitAmt > 0) running = roundToTwoDecimals(running - debitAmt);
+    if (creditAmt > 0) running = roundToTwoDecimals(running + creditAmt);
+    row.balance = formatAmount(running);
+  }
+}
 
 // Get all transactions with filters (Daily transactions, GCEC PDC, Customer PDC, Purchase Bills)
 router.get('/all', authenticateToken, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
 
-    // Build date filter conditions and parameters
-    const buildDateFilter = (dateColumn, baseParamCount = 0) => {
+    // Build date filter conditions and parameters (MySQL placeholders)
+    const buildDateFilter = (dateColumn) => {
       const conditions = [];
       const params = [];
-      let paramCount = baseParamCount;
 
       if (startDate) {
-        paramCount++;
-        conditions.push(`${dateColumn} >= $${paramCount}`);
+        conditions.push(`${dateColumn} >= ?`);
         params.push(startDate);
       }
       if (endDate) {
-        paramCount++;
-        conditions.push(`${dateColumn} <= $${paramCount}`);
+        conditions.push(`${dateColumn} <= ?`);
         params.push(endDate);
       }
 
       return {
         whereClause: conditions.length > 0 ? conditions.join(' AND ') : '',
-        params: params,
-        paramCount: paramCount
+        params
       };
     };
 
@@ -64,7 +198,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       ORDER BY t.date ASC, t.id ASC
     `;
     const transactionsResult = await pool.query(transactionsQuery, txnDateFilter.params);
-    const dailyTransactions = transactionsResult.rows.map(txn => ({
+    let dailyTransactions = transactionsResult.rows.map(txn => ({
       id: txn.id,
       date: txn.date,
       transactionType: 'Daily Transaction',
@@ -79,6 +213,14 @@ router.get('/all', authenticateToken, async (req, res) => {
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
     }));
+
+    // PDCs whose cheque date has arrived: Daily Transaction rows dated as cheque_date (same range as filters when set)
+    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({ startDate, endDate });
+    const pdcAsDaily = pdcRows.map((pdc) =>
+      mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'Daily Transaction' })
+    );
+    dailyTransactions = sortMergedByDateThenId([...dailyTransactions, ...pdcAsDaily]);
+    await applyRunningBalancesToMainRows(dailyTransactions);
 
     // 2. Get GCEC PDC
     const gcecPdcDateFilter = buildDateFilter('pdc.cheque_date');
@@ -99,6 +241,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       FROM post_dated_cheques pdc
       LEFT JOIN users u ON pdc.created_by = u.id
       WHERE pdc.pdc_type = 'GCEC PDC'
+        AND pdc.cheque_date > CURDATE()
       ${gcecPdcDateFilter.whereClause ? `AND ${gcecPdcDateFilter.whereClause}` : ''}
       ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
     `;
@@ -136,6 +279,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       FROM post_dated_cheques pdc
       LEFT JOIN users u ON pdc.created_by = u.id
       WHERE pdc.pdc_type = 'Customer PDC'
+        AND pdc.cheque_date > CURDATE()
       ${customerPdcDateFilter.whereClause ? `AND ${customerPdcDateFilter.whereClause}` : ''}
       ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
     `;
@@ -194,7 +338,6 @@ router.get('/all', authenticateToken, async (req, res) => {
       createdAt: bill.created_at
     }));
 
-    // Combine all transactions in the specified order
     const allTransactions = [
       ...dailyTransactions,
       ...gcecPdcs,
@@ -227,13 +370,13 @@ router.get('/all', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all transactions (table format)
+// Get all transactions (table format) — includes matured PDCs as synthetic rows on their cheque_date (same rules as /all daily list)
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const transactions = await Transaction.getAll();
 
     // Format response to match table layout
-    const formattedTransactions = transactions.map(txn => ({
+    let formattedTransactions = transactions.map(txn => ({
       id: txn.id,
       date: txn.date,
       category: txn.category_name || '-',
@@ -248,22 +391,196 @@ router.get('/', authenticateToken, async (req, res) => {
       createdAt: txn.created_at
     }));
 
-    // Get current balance (latest transaction balance - last in array since ordered ASC)
-    const currentBalance = transactions.length > 0 
-     ? formatAmount(transactions[transactions.length - 1].balance) 
-      : "0.00";
+    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({});
+    const synthetic = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
+    formattedTransactions = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
+    await applyRunningBalancesToMainRows(formattedTransactions);
+
+    const currentBalance =
+      formattedTransactions.length > 0 ? formattedTransactions[formattedTransactions.length - 1].balance : '0.00';
 
     res.json({
       success: true,
       data: formattedTransactions,
       currentBalance: currentBalance,
-      totalTransactions: transactions.length
+      totalTransactions: formattedTransactions.length
     });
   } catch (error) {
     console.error('Error fetching transactions:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to fetch transactions'
+    });
+  }
+});
+
+const MAX_BULK_TRANSACTIONS = 500;
+
+function normalizeTransactionDateInput(date) {
+  if (date == null) return null;
+  let formattedDate = date;
+  if (String(date).includes('/')) {
+    const [day, month, year] = String(date).split('/');
+    formattedDate = `${year}-${month}-${day}`;
+  }
+  return formattedDate;
+}
+
+function formatCreatedTransactionRow(transaction) {
+  return {
+    id: transaction.id,
+    date: transaction.date,
+    category: transaction.category_name || '-',
+    paymentType: transaction.payment_type,
+    chequeNumber: transaction.cheque_number || '-',
+    debit: transaction.type === 'Debit' ? formatAmount(transaction.amount) : null,
+    credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
+    balance: formatAmount(transaction.balance),
+    remarks: transaction.remarks || null,
+    createdBy: transaction.created_by,
+    createdByUsername: transaction.created_by_username,
+    createdAt: transaction.created_at
+  };
+}
+
+/**
+ * Bulk create daily transactions (AED ledger). Body: { transactions: [ ...same fields as POST / ] }
+ * Rows apply after existing rows on each date, in array order within the batch.
+ */
+router.post('/bulk', authenticateToken, async (req, res) => {
+  try {
+    const raw =
+      req.body && Array.isArray(req.body.transactions)
+        ? req.body.transactions
+        : null;
+
+    if (!raw) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body must include a "transactions" array'
+      });
+    }
+
+    if (raw.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: '"transactions" must not be empty'
+      });
+    }
+
+    if (raw.length > MAX_BULK_TRANSACTIONS) {
+      return res.status(400).json({
+        success: false,
+        error: `At most ${MAX_BULK_TRANSACTIONS} transactions per request`
+      });
+    }
+
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    const errors = [];
+    const normalized = [];
+
+    for (let i = 0; i < raw.length; i++) {
+      const row = raw[i];
+      const {
+        date,
+        type,
+        categoryId,
+        paymentType,
+        chequeNumber,
+        amount,
+        remarks
+      } = row || {};
+
+      if (!date || !type || !paymentType || amount == null) {
+        errors.push({
+          index: i,
+          error: 'Date, type, paymentType, and amount are required'
+        });
+        continue;
+      }
+
+      if (type !== 'Debit' && type !== 'Credit') {
+        errors.push({
+          index: i,
+          error: 'Type must be either "Debit" or "Credit"'
+        });
+        continue;
+      }
+
+      if (!validPaymentTypes.includes(String(paymentType).toLowerCase())) {
+        errors.push({
+          index: i,
+          error: `Payment type must be one of: ${validPaymentTypes.join(', ')}`
+        });
+        continue;
+      }
+
+      if (
+        String(paymentType).toLowerCase() === 'cheque' &&
+        (!chequeNumber || String(chequeNumber).trim() === '')
+      ) {
+        errors.push({
+          index: i,
+          error: 'Cheque number is required when payment type is cheque'
+        });
+        continue;
+      }
+
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) {
+        errors.push({
+          index: i,
+          error: 'Amount must be greater than 0'
+        });
+        continue;
+      }
+
+      let parsedCategoryId = null;
+      if (categoryId != null && categoryId !== '') {
+        parsedCategoryId = parseInt(categoryId, 10);
+        if (!Number.isFinite(parsedCategoryId)) {
+          errors.push({
+            index: i,
+            error: 'categoryId must be a number when provided'
+          });
+          continue;
+        }
+      }
+
+      const formattedDate = normalizeTransactionDateInput(date);
+      normalized.push({
+        date: formattedDate,
+        type,
+        categoryId: parsedCategoryId,
+        paymentType: String(paymentType).toLowerCase(),
+        chequeNumber: chequeNumber || null,
+        amount: roundToTwoDecimals(parsedAmount),
+        remarks: remarks != null ? remarks : null
+      });
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed for one or more rows',
+        errors
+      });
+    }
+
+    const createdBy = req.user ? req.user.id : null;
+    const created = await Transaction.createMany(normalized, createdBy);
+
+    res.status(201).json({
+      success: true,
+      message: `${created.length} transaction(s) created successfully`,
+      created: created.length,
+      data: created.map(formatCreatedTransactionRow)
+    });
+  } catch (error) {
+    console.error('Error bulk creating transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to bulk create transactions'
     });
   }
 });
@@ -378,20 +695,7 @@ router.post('/', authenticateToken, async (req, res) => {
     res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
-      data: {
-        id: transaction.id,
-        date: transaction.date,
-        category: transaction.category_name || '-',
-        paymentType: transaction.payment_type,
-        chequeNumber: transaction.cheque_number || '-',
-        debit: transaction.type === 'Debit' ? formatAmount(transaction.amount) : null,
-        credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
-        balance: formatAmount(transaction.balance),
-        remarks: transaction.remarks || null,
-        createdBy: transaction.created_by,
-        createdByUsername: transaction.created_by_username,
-        createdAt: transaction.created_at
-      }
+      data: formatCreatedTransactionRow(transaction)
     });
   } catch (error) {
     console.error('Error creating transaction:', error);
@@ -403,7 +707,11 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // Update a transaction
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
   try {
     const { id } = req.params;
     const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
@@ -502,7 +810,11 @@ router.put('/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete a transaction
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await Transaction.delete(id);
@@ -528,7 +840,11 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 // Recalculate all balances (useful for fixing incorrect balances)
-router.post('/recalculate-balances', authenticateToken, async (req, res) => {
+router.post(
+  '/recalculate-balances',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
   try {
     const finalBalance = await Transaction.recalculateAllBalances();
     

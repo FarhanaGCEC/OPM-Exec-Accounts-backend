@@ -35,7 +35,9 @@ const wrapQuery = (executor) => {
     // mysql2: SELECT returns array of rows, INSERT/UPDATE/DELETE returns ResultSetHeader
     const rows = Array.isArray(result) ? result : [];
     const affectedRows = result && typeof result.affectedRows === 'number' ? result.affectedRows : undefined;
-    return { rows, affectedRows };
+    const insertId =
+      result && typeof result.insertId === 'number' && result.insertId > 0 ? result.insertId : undefined;
+    return { rows, affectedRows, insertId };
   };
 };
 
@@ -283,9 +285,40 @@ const initDatabase = async () => {
         id INT AUTO_INCREMENT PRIMARY KEY,
         username VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
+        role ENUM('admin', 'accountant', 'user') NOT NULL DEFAULT 'user',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    if (await tableExists('users')) {
+      if (!(await columnExists('users', 'role'))) {
+        await pool.query(`
+          ALTER TABLE users
+          ADD COLUMN role ENUM('admin', 'accountant', 'user') NOT NULL DEFAULT 'user'
+        `);
+      }
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS change_requests (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        requester_id INT NULL,
+        action ENUM('edit', 'delete') NOT NULL,
+        resource_type VARCHAR(64) NOT NULL,
+        resource_id VARCHAR(64) NOT NULL,
+        payload JSON NULL,
+        request_note TEXT NULL,
+        status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
+        reviewed_by INT NULL,
+        reviewed_at TIMESTAMP NULL,
+        review_note TEXT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_change_requests_requester FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_change_requests_reviewer FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `);
+    await ensureIndex('change_requests', 'idx_change_requests_status', '`status`');
+    await ensureIndex('change_requests', 'idx_change_requests_requester', 'requester_id');
 
     // Create payables_categories
     await pool.query(`
@@ -340,6 +373,10 @@ const initDatabase = async () => {
         cheque_type VARCHAR(50) NOT NULL DEFAULT 'Payment Cheque',
         pdc_type VARCHAR(50) NOT NULL,
         description TEXT,
+        daily_ledger_approved TINYINT(1) NOT NULL DEFAULT 0,
+        attachment_name VARCHAR(512) NULL,
+        attachment_url TEXT NULL,
+        attachment_cloudinary_public_id VARCHAR(512) NULL,
         created_by INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -348,6 +385,27 @@ const initDatabase = async () => {
       )
     `);
     await ensureIndex('post_dated_cheques', 'idx_pdc_cheque_date', 'cheque_date');
+
+    if (await tableExists('post_dated_cheques')) {
+      if (!(await columnExists('post_dated_cheques', 'attachment_name'))) {
+        await pool.query(
+          'ALTER TABLE post_dated_cheques ADD COLUMN attachment_name VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('post_dated_cheques', 'attachment_url'))) {
+        await pool.query('ALTER TABLE post_dated_cheques ADD COLUMN attachment_url TEXT NULL');
+      }
+      if (!(await columnExists('post_dated_cheques', 'attachment_cloudinary_public_id'))) {
+        await pool.query(
+          'ALTER TABLE post_dated_cheques ADD COLUMN attachment_cloudinary_public_id VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('post_dated_cheques', 'daily_ledger_approved'))) {
+        await pool.query(
+          'ALTER TABLE post_dated_cheques ADD COLUMN daily_ledger_approved TINYINT(1) NOT NULL DEFAULT 0'
+        );
+      }
+    }
 
     // Create credit_cards_new (UUID-based)
     await pool.query(`
@@ -465,6 +523,10 @@ const initDatabase = async () => {
         epp_balance DECIMAL(15, 2) NOT NULL DEFAULT 0,
         balance_transfer DECIMAL(15, 2) NOT NULL DEFAULT 0,
         payment_status VARCHAR(10) NOT NULL DEFAULT 'PARTIAL',
+        attachment_name VARCHAR(512) NULL,
+        attachment_storage_key VARCHAR(255) NULL,
+        attachment_url TEXT NULL,
+        attachment_cloudinary_public_id VARCHAR(512) NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uk_card_month (credit_card_id, statement_month),
@@ -476,6 +538,27 @@ const initDatabase = async () => {
     await ensureIndex('card_statements', 'idx_card_statements_month', 'statement_month');
     await ensureIndex('card_statements', 'idx_card_statements_card_month', 'credit_card_id, statement_month');
     await ensureIndex('card_statements', 'idx_card_statements_status', 'payment_status');
+
+    if (await tableExists('card_statements')) {
+      if (!(await columnExists('card_statements', 'attachment_name'))) {
+        await pool.query(
+          'ALTER TABLE card_statements ADD COLUMN attachment_name VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('card_statements', 'attachment_storage_key'))) {
+        await pool.query(
+          'ALTER TABLE card_statements ADD COLUMN attachment_storage_key VARCHAR(255) NULL'
+        );
+      }
+      if (!(await columnExists('card_statements', 'attachment_url'))) {
+        await pool.query('ALTER TABLE card_statements ADD COLUMN attachment_url TEXT NULL');
+      }
+      if (!(await columnExists('card_statements', 'attachment_cloudinary_public_id'))) {
+        await pool.query(
+          'ALTER TABLE card_statements ADD COLUMN attachment_cloudinary_public_id VARCHAR(512) NULL'
+        );
+      }
+    }
 
     await seedDefaultCreditCardsNew();
     await fixExistingCardData();

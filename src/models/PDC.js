@@ -1,4 +1,5 @@
 const { pool } = require('../config/database');
+const { parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
 
 class PDC {
   // Helper method to format dates to ISO strings
@@ -27,6 +28,9 @@ class PDC {
        ? pdc.updated_at.toISOString() 
         : pdc.updated_at;
     }
+    if (Object.prototype.hasOwnProperty.call(pdc, 'daily_ledger_approved')) {
+      formatted.daily_ledger_approved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
+    }
     return formatted;
   }
 
@@ -43,6 +47,10 @@ class PDC {
           pdc.cheque_type,
           pdc.pdc_type,
           pdc.description,
+          pdc.daily_ledger_approved,
+          pdc.attachment_name,
+          pdc.attachment_url,
+          pdc.attachment_cloudinary_public_id,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,
@@ -70,6 +78,10 @@ class PDC {
           pdc.cheque_type,
           pdc.pdc_type,
           pdc.description,
+          pdc.daily_ledger_approved,
+          pdc.attachment_name,
+          pdc.attachment_url,
+          pdc.attachment_cloudinary_public_id,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,
@@ -110,7 +122,9 @@ class PDC {
         ]
       );
       const fetchResult = await pool.query(
-        'SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description, created_by, created_at, updated_at FROM post_dated_cheques WHERE id = LAST_INSERT_ID()'
+        `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
+          daily_ledger_approved, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          FROM post_dated_cheques WHERE id = LAST_INSERT_ID()`
       );
 
       // Get created_by username if created_by exists
@@ -162,7 +176,9 @@ class PDC {
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description, created_by, created_at, updated_at FROM post_dated_cheques WHERE id = ?',
+        `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
+          daily_ledger_approved, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          FROM post_dated_cheques WHERE id = ?`,
         [id]
       );
       const pdc = fetchResult.rows[0];
@@ -183,6 +199,43 @@ class PDC {
         ...pdc,
         created_by_username: createdByUsername
       });
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /** Mark matured GCEC/Custom PDC as approved on the daily ledger (hides pending footer duplicate). */
+  static async setDailyLedgerApproved(id, approved) {
+    try {
+      const v = approved ? 1 : 0;
+      const updateResult = await pool.query(
+        `UPDATE post_dated_cheques 
+         SET daily_ledger_approved = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE id = ?`,
+        [v, id]
+      );
+      if (updateResult.affectedRows === 0) {
+        return null;
+      }
+      return await this.getById(id);
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /** Set cheque scan (Cloudinary); does not alter other fields */
+  static async setChequeAttachment(id, { attachmentName, attachmentUrl, attachmentCloudinaryPublicId }) {
+    try {
+      const updateResult = await pool.query(
+        `UPDATE post_dated_cheques 
+         SET attachment_name = ?, attachment_url = ?, attachment_cloudinary_public_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [attachmentName, attachmentUrl, attachmentCloudinaryPublicId, id]
+      );
+      if (updateResult.affectedRows === 0) {
+        return null;
+      }
+      return await this.getById(id);
     } catch (error) {
       throw error;
     }
@@ -220,6 +273,10 @@ class PDC {
           pdc.cheque_type,
           pdc.pdc_type,
           pdc.description,
+          pdc.daily_ledger_approved,
+          pdc.attachment_name,
+          pdc.attachment_url,
+          pdc.attachment_cloudinary_public_id,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,

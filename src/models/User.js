@@ -1,29 +1,27 @@
 const { pool } = require('../config/database');
 
 class User {
-  static async create(username, password) {
+  static async create(username, password, role = 'user') {
     try {
-      // Check if user already exists
       const existingUser = await this.findByUsername(username);
       if (existingUser) {
         throw new Error('Username already exists');
       }
 
-      // Insert new user
       await pool.query(
-        'INSERT INTO users (username, password) VALUES (?, ?)',
-        [username, password]
+        'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+        [username, password, role]
       );
       const result = await pool.query(
-        'SELECT id, username, created_at FROM users WHERE username = ?',
+        'SELECT id, username, role, created_at FROM users WHERE username = ?',
         [username]
       );
 
       return {
         id: result.rows[0].id,
         username: result.rows[0].username,
-        password: password,
-        createdAt: result.rows[0].created_at
+        role: result.rows[0].role,
+        createdAt: result.rows[0].created_at,
       };
     } catch (error) {
       if (error.code === 'ER_DUP_ENTRY') {
@@ -36,7 +34,7 @@ class User {
   static async findByUsername(username) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, created_at FROM users WHERE username = ?',
+        'SELECT id, username, password, role, created_at FROM users WHERE username = ?',
         [username]
       );
 
@@ -49,7 +47,8 @@ class User {
         id: user.id,
         username: user.username,
         password: user.password,
-        createdAt: user.created_at
+        role: user.role || 'user',
+        createdAt: user.created_at,
       };
     } catch (error) {
       throw error;
@@ -59,7 +58,7 @@ class User {
   static async findById(id) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, created_at FROM users WHERE id = ?',
+        'SELECT id, username, password, role, created_at FROM users WHERE id = ?',
         [id]
       );
 
@@ -72,7 +71,8 @@ class User {
         id: user.id,
         username: user.username,
         password: user.password,
-        createdAt: user.created_at
+        role: user.role || 'user',
+        createdAt: user.created_at,
       };
     } catch (error) {
       throw error;
@@ -83,12 +83,53 @@ class User {
   static async getAll() {
     try {
       const result = await pool.query(
-        'SELECT id, username, created_at FROM users ORDER BY created_at DESC'
+        'SELECT id, username, role, created_at FROM users ORDER BY created_at DESC'
       );
       return result.rows;
     } catch (error) {
       throw error;
     }
+  }
+
+  static async updatePassword(id, hashedPassword) {
+    const result = await pool.query('UPDATE users SET password = ? WHERE id = ?', [
+      hashedPassword,
+      id,
+    ]);
+    if (!result.affectedRows) {
+      throw new Error('User not found');
+    }
+  }
+
+  static async updateRole(id, role) {
+    const result = await pool.query('UPDATE users SET role = ? WHERE id = ?', [role, id]);
+    if (!result.affectedRows) {
+      throw new Error('User not found');
+    }
+  }
+
+  static async updateUsername(id, username) {
+    const trimmed = String(username).trim();
+    const existingUser = await this.findByUsername(trimmed);
+    if (existingUser && existingUser.id !== id) {
+      throw new Error('Username already exists');
+    }
+    const result = await pool.query('UPDATE users SET username = ? WHERE id = ?', [trimmed, id]);
+    if (!result.affectedRows) {
+      throw new Error('User not found');
+    }
+  }
+
+  static async deleteById(id) {
+    const result = await pool.query('DELETE FROM users WHERE id = ?', [id]);
+    if (!result.affectedRows) {
+      throw new Error('User not found');
+    }
+  }
+
+  static async countByRole(role) {
+    const result = await pool.query('SELECT COUNT(*) AS c FROM users WHERE role = ?', [role]);
+    return parseInt(result.rows[0].c, 10);
   }
 }
 

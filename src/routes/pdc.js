@@ -1,9 +1,97 @@
 const express = require('express');
 const PDC = require('../models/PDC');
 const { authenticateToken } = require('../middleware/auth');
+const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+
+const { isGcecPdcType, parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
+const {
+  uploadPdcChequeImage,
+  destroyPdcChequeImage,
+  isCloudinaryConfigured
+} = require('../services/cloudinaryPdcUpload');
+const { pdcImageUploadMiddleware, optionalPdcImageMultipart } = require('../middleware/pdcAttachmentUpload');
 
 const router = express.Router();
+
+function formatPdcForApi(pdc) {
+  if (!pdc) return pdc;
+  const attachment = pdc.attachment_url
+    ? { name: pdc.attachment_name || 'cheque-image', url: pdc.attachment_url }
+    : null;
+  const {
+    attachment_name,
+    attachment_url,
+    attachment_cloudinary_public_id,
+    daily_ledger_approved,
+    ...rest
+  } = pdc;
+  const gcec = isGcecPdcType(pdc.pdc_type);
+  const ledgerOk = gcec ? parseDailyLedgerApproved(daily_ledger_approved) : true;
+  const out = {
+    ...rest,
+    amount: formatAmount(pdc.amount),
+    attachment,
+    dailyLedgerApproved: ledgerOk,
+    pendingGcecLedgerApproval: gcec && !ledgerOk
+  };
+  if (out.days_remaining !== undefined) {
+    out.days_remaining = parseInt(out.days_remaining, 10) || 0;
+  }
+  return out;
+}
+
+/** Accept camelCase (API) or snake_case (mirrors DB / some clients) */
+function normalizePdcInput(body = {}) {
+  return {
+    chequeDate: body.chequeDate ?? body.cheque_date,
+    chequeNumber: body.chequeNumber ?? body.cheque_number,
+    customerName: body.customerName ?? body.customer_name,
+    amount: body.amount,
+    chequeType: body.chequeType ?? body.cheque_type,
+    pdcType: body.pdcType ?? body.pdc_type,
+    description: body.description
+  };
+}
+
+async function finalizePdcAttachment(req, pdcId, prevCloudinaryPublicId = null) {
+  if (!req.file) {
+    return { ok: true };
+  }
+  if (!isCloudinaryConfigured()) {
+    return {
+      ok: false,
+      status: 503,
+      error:
+        'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+    };
+  }
+  const originalName = (req.file.originalname || 'cheque.jpg').slice(0, 512);
+  let uploaded;
+  try {
+    uploaded = await uploadPdcChequeImage({
+      buffer: req.file.buffer,
+      pdcId,
+      originalFilename: originalName
+    });
+  } catch (e) {
+    console.error('Cloudinary PDC upload error:', e);
+    return {
+      ok: false,
+      status: 502,
+      error: e.message || 'Failed to upload cheque image to Cloudinary'
+    };
+  }
+  await PDC.setChequeAttachment(pdcId, {
+    attachmentName: originalName,
+    attachmentUrl: uploaded.secure_url,
+    attachmentCloudinaryPublicId: uploaded.public_id
+  });
+  if (prevCloudinaryPublicId && prevCloudinaryPublicId !== uploaded.public_id) {
+    await destroyPdcChequeImage(prevCloudinaryPublicId);
+  }
+  return { ok: true };
+}
 
 // Get all post-dated cheques
 router.get('/', authenticateToken, async (req, res) => {
@@ -11,11 +99,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const pdcs = await PDC.getAll();
     res.json({
       success: true,
-      data: pdcs.map(pdc => {
-        const formatted = { ...pdc };
-        formatted.amount = formatAmount(pdc.amount);
-        return formatted;
-      })
+      data: pdcs.map((pdc) => formatPdcForApi(pdc))
     });
   } catch (error) {
     console.error('Error fetching PDCs:', error);
@@ -72,13 +156,7 @@ router.get('/reminders', authenticateToken, async (req, res) => {
     
     res.json({
       success: true,
-      data: pdcs.map(pdc => {
-        const formatted = { ...pdc };
-        formatted.amount = formatAmount(pdc.amount);
-        // Ensure days_remaining is a number
-        formatted.days_remaining = parseInt(pdc.days_remaining) || 0;
-        return formatted;
-      }),
+      data: pdcs.map((pdc) => formatPdcForApi(pdc)),
       count: pdcs.length,
       days_lookahead: days
     });
@@ -88,6 +166,175 @@ router.get('/reminders', authenticateToken, async (req, res) => {
       success: false,
       error: 'Failed to fetch PDC reminders',
       details: error.message
+    });
+  }
+});
+
+// Cheque image on Cloudinary — multipart field `attachment` (JPEG, PNG, WebP, GIF, HEIC)
+router.post(
+  '/:id/attachment',
+  authenticateToken,
+  requireElevatedForMutation,
+  pdcImageUploadMiddleware,
+  async (req, res) => {
+    try {
+      if (!isCloudinaryConfigured()) {
+        return res.status(503).json({
+          success: false,
+          error:
+            'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing image: send multipart field "attachment"'
+        });
+      }
+
+      const pdcId = parseInt(req.params.id, 10);
+      if (Number.isNaN(pdcId)) {
+        return res.status(400).json({ success: false, error: 'Invalid PDC id' });
+      }
+
+      const existing = await PDC.getById(pdcId);
+      if (!existing) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+
+      const prevCloudinaryId = existing.attachment_cloudinary_public_id;
+      const originalName = (req.file.originalname || 'cheque.jpg').slice(0, 512);
+
+      let uploaded;
+      try {
+        uploaded = await uploadPdcChequeImage({
+          buffer: req.file.buffer,
+          pdcId,
+          originalFilename: originalName
+        });
+      } catch (cloudErr) {
+        console.error('Cloudinary PDC upload error:', cloudErr);
+        return res.status(502).json({
+          success: false,
+          error: cloudErr.message || 'Failed to upload cheque image to Cloudinary'
+        });
+      }
+
+      await PDC.setChequeAttachment(pdcId, {
+        attachmentName: originalName,
+        attachmentUrl: uploaded.secure_url,
+        attachmentCloudinaryPublicId: uploaded.public_id
+      });
+
+      if (prevCloudinaryId && prevCloudinaryId !== uploaded.public_id) {
+        await destroyPdcChequeImage(prevCloudinaryId);
+      }
+
+      const pdc = await PDC.getById(pdcId);
+      res.json({
+        success: true,
+        message: 'Cheque image attached',
+        data: formatPdcForApi(pdc)
+      });
+    } catch (error) {
+      console.error('Error attaching PDC image:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to attach cheque image'
+      });
+    }
+  }
+);
+
+/**
+ * Approve matured GCEC PDC on the daily ledger (Customer & Custom PDC are auto-approved in the UI; only GCEC uses this).
+ * Body: { "approved": true } or { "dailyLedgerApproved": true }
+ */
+router.patch(
+  '/:id/daily-ledger-approved',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
+    try {
+      const pdcId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(pdcId) || pdcId < 1) {
+        return res.status(400).json({ success: false, error: 'Invalid PDC id' });
+      }
+
+      const raw =
+        req.body.approved !== undefined
+          ? req.body.approved
+          : req.body.dailyLedgerApproved !== undefined
+            ? req.body.dailyLedgerApproved
+            : undefined;
+      if (raw === undefined) {
+        return res.status(400).json({
+          success: false,
+          error: 'Body must include approved or dailyLedgerApproved (boolean)'
+        });
+      }
+
+      const approved = raw === true || raw === 1 || String(raw).toLowerCase() === 'true';
+      const existing = await PDC.getById(pdcId);
+      if (!existing) {
+        return res.status(404).json({ success: false, error: 'Post-dated cheque not found' });
+      }
+      if (!isGcecPdcType(existing.pdc_type)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Daily ledger approval applies only to GCEC PDC (Customer PDC and Custom PDC are auto-approved)'
+        });
+      }
+
+      const updated = await PDC.setDailyLedgerApproved(pdcId, approved);
+      res.json({
+        success: true,
+        message: approved ? 'Daily ledger marked as approved' : 'Daily ledger approval cleared',
+        data: formatPdcForApi(updated)
+      });
+    } catch (error) {
+      console.error('Error updating daily ledger approval:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to update daily ledger approval'
+      });
+    }
+  }
+);
+
+// Redirect to Cloudinary URL (same attachment as in list/detail)
+router.get('/:id/attachment', authenticateToken, async (req, res) => {
+  try {
+    const pdcId = parseInt(req.params.id, 10);
+    if (Number.isNaN(pdcId)) {
+      return res.status(400).json({ success: false, error: 'Invalid PDC id' });
+    }
+
+    const pdc = await PDC.getById(pdcId);
+    if (!pdc) {
+      return res.status(404).json({
+        success: false,
+        error: 'Post-dated cheque not found'
+      });
+    }
+
+    if (!pdc.attachment_url) {
+      return res.status(404).json({
+        success: false,
+        error: 'No cheque image attached'
+      });
+    }
+
+    res.redirect(302, pdc.attachment_url);
+  } catch (error) {
+    console.error('Error resolving PDC attachment:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to resolve attachment'
     });
   }
 });
@@ -105,11 +352,9 @@ router.get('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    const formattedPDC = { ...pdc };
-    formattedPDC.amount = formatAmount(pdc.amount);
     res.json({
       success: true,
-      data: formattedPDC
+      data: formatPdcForApi(pdc)
     });
   } catch (error) {
     res.status(500).json({
@@ -119,10 +364,12 @@ router.get('/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Create a new PDC
-router.post('/', authenticateToken, async (req, res) => {
+// Create a new PDC (JSON body, or multipart/form-data with same fields + optional file field `attachment`)
+router.post('/', authenticateToken, optionalPdcImageMultipart, async (req, res) => {
   try {
-    const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = req.body;
+    const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = normalizePdcInput(
+      req.body
+    );
 
     // Validation
     if (!chequeDate || !chequeNumber || !customerName || !amount || !chequeType || !pdcType) {
@@ -170,9 +417,10 @@ router.post('/', authenticateToken, async (req, res) => {
     const roundedAmount = roundToTwoDecimals(parsedAmount);
 
     // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
-    let formattedDate = chequeDate;
-    if (chequeDate.includes('/')) {
-      const [day, month, year] = chequeDate.split('/');
+    const dateStr = String(chequeDate);
+    let formattedDate = dateStr;
+    if (dateStr.includes('/')) {
+      const [day, month, year] = dateStr.split('/');
       formattedDate = `${year}-${month}-${day}`;
     }
 
@@ -190,12 +438,20 @@ router.post('/', authenticateToken, async (req, res) => {
       createdBy: createdBy
     });
 
-    const formattedPDC = { ...pdc };
-    formattedPDC.amount = formatAmount(pdc.amount);
+    const attachResult = await finalizePdcAttachment(req, pdc.id, null);
+    if (!attachResult.ok) {
+      await PDC.delete(pdc.id);
+      return res.status(attachResult.status).json({
+        success: false,
+        error: attachResult.error
+      });
+    }
+
+    const full = await PDC.getById(pdc.id);
     res.status(201).json({
       success: true,
       message: 'Post-dated cheque created successfully',
-      data: formattedPDC
+      data: formatPdcForApi(full)
     });
   } catch (error) {
     console.error('Error creating PDC:', error);
@@ -206,13 +462,25 @@ router.post('/', authenticateToken, async (req, res) => {
   }
 });
 
-// Update a PDC
-router.put('/:id', authenticateToken, async (req, res) => {
+const updatePdcHandler = async (req, res) => {
   try {
     const { id } = req.params;
-    const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = req.body;
+    let prevCloudinaryPublicId = null;
+    if (req.file) {
+      const existingForAttach = await PDC.getById(id);
+      if (!existingForAttach) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+      prevCloudinaryPublicId = existingForAttach.attachment_cloudinary_public_id;
+    }
 
-    // Validation
+    const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = normalizePdcInput(
+      req.body
+    );
+
     if (!chequeDate || !chequeNumber || !customerName || !amount || !chequeType || !pdcType) {
       return res.status(400).json({
         success: false,
@@ -220,7 +488,6 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Validate cheque type
     const validChequeTypes = ['Payment Cheque', 'Security Cheque', 'Other'];
     if (!validChequeTypes.includes(chequeType)) {
       return res.status(400).json({
@@ -229,7 +496,6 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Validate PDC type
     const validPDCTypes = ['GCEC PDC', 'Customer PDC', 'Custom PDC'];
     if (!validPDCTypes.includes(pdcType)) {
       return res.status(400).json({
@@ -238,7 +504,6 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // If Custom PDC, description is required
     if (pdcType === 'Custom PDC' && (!description || description.trim() === '')) {
       return res.status(400).json({
         success: false,
@@ -254,24 +519,23 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Round amount to 2 decimal places before saving
     const roundedAmount = roundToTwoDecimals(parsedAmount);
 
-    // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
-    let formattedDate = chequeDate;
-    if (chequeDate.includes('/')) {
-      const [day, month, year] = chequeDate.split('/');
+    const dateStr = String(chequeDate);
+    let formattedDate = dateStr;
+    if (dateStr.includes('/')) {
+      const [day, month, year] = dateStr.split('/');
       formattedDate = `${year}-${month}-${day}`;
     }
 
     const pdc = await PDC.update(id, {
       chequeDate: formattedDate,
-      chequeNumber: chequeNumber.trim(),
-      customerName: customerName.trim(),
+      chequeNumber: String(chequeNumber).trim(),
+      customerName: String(customerName).trim(),
       amount: roundedAmount,
       chequeType: chequeType,
       pdcType: pdcType,
-      description: description ? description.trim() : null
+      description: description ? String(description).trim() : null
     });
 
     if (!pdc) {
@@ -281,12 +545,19 @@ router.put('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    const formattedPDC = { ...pdc };
-    formattedPDC.amount = formatAmount(pdc.amount);
+    const attachResult = await finalizePdcAttachment(req, id, prevCloudinaryPublicId);
+    if (!attachResult.ok) {
+      return res.status(attachResult.status).json({
+        success: false,
+        error: attachResult.error
+      });
+    }
+
+    const full = await PDC.getById(id);
     res.json({
       success: true,
       message: 'Post-dated cheque updated successfully',
-      data: formattedPDC
+      data: formatPdcForApi(full)
     });
   } catch (error) {
     console.error('Error updating PDC:', error);
@@ -295,12 +566,27 @@ router.put('/:id', authenticateToken, async (req, res) => {
       error: error.message || 'Failed to update post-dated cheque'
     });
   }
-});
+};
+
+// Update a PDC (PUT or PATCH — JSON or multipart + optional `attachment`)
+router.put('/:id', authenticateToken, requireElevatedForMutation, optionalPdcImageMultipart, updatePdcHandler);
+router.patch(
+  '/:id',
+  authenticateToken,
+  requireElevatedForMutation,
+  optionalPdcImageMultipart,
+  updatePdcHandler
+);
 
 // Delete a PDC
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await PDC.getById(id);
+    if (existing?.attachment_cloudinary_public_id) {
+      await destroyPdcChequeImage(existing.attachment_cloudinary_public_id);
+    }
+
     const deleted = await PDC.delete(id);
 
     if (!deleted) {

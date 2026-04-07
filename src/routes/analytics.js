@@ -5,16 +5,13 @@ const { formatAmount } = require('../utils/formatAmount');
 
 const router = express.Router();
 
-// MySQL date grouping helpers
-const getDateGroupExpr = (period) => {
-  if (period === 'daily') return 'DATE(t.date)';
-  if (period === 'weekly') return 'YEARWEEK(t.date)';
-  return 'DATE_FORMAT(t.date, \'%Y-%m-01\')';
-};
-const getPeriodFormat = (period) => {
-  if (period === 'daily') return 'DATE_FORMAT(DATE(t.date), \'%Y-%m-%d\')';
-  if (period === 'weekly') return 'CONCAT(YEAR(t.date), \'-W\', LPAD(WEEK(t.date), 2, \'0\'))';
-  return 'DATE_FORMAT(t.date, \'%Y-%m\')';
+// MySQL ONLY_FULL_GROUP_BY: SELECT non-aggregates must match GROUP BY expressions.
+const getPeriodGroupExpr = (period) => {
+  if (period === 'daily') return "DATE_FORMAT(t.date, '%Y-%m-%d')";
+  if (period === 'weekly') {
+    return "CONCAT(YEAR(t.date), '-W', LPAD(WEEK(t.date, 1), 2, '0'))";
+  }
+  return "DATE_FORMAT(t.date, '%Y-%m')";
 };
 
 // Get debit/credit analytics for charts
@@ -22,8 +19,7 @@ router.get('/transactions', authenticateToken, async (req, res) => {
   try {
     const { period = 'monthly', startDate, endDate } = req.query;
 
-    const groupBy = getDateGroupExpr(period);
-    const periodExpr = getPeriodFormat(period);
+    const periodExpr = getPeriodGroupExpr(period);
 
     let dateFilter = '';
     const params = [];
@@ -40,8 +36,8 @@ router.get('/transactions', authenticateToken, async (req, res) => {
         COUNT(*) as transaction_count
       FROM transactions t
       ${dateFilter}
-      GROUP BY ${groupBy}, t.type
-      ORDER BY ${groupBy} DESC, t.type
+      GROUP BY ${periodExpr}, t.type
+      ORDER BY period DESC, t.type
     `;
 
     const result = await pool.query(query, params);
@@ -154,7 +150,7 @@ router.get('/category-summary', authenticateToken, async (req, res) => {
       LEFT JOIN payables_categories pc ON t.category_id = pc.id AND t.category_type = 'payable'
       LEFT JOIN receivables_categories rc ON t.category_id = rc.id AND t.category_type = 'receivable'
       ${dateFilter}
-      GROUP BY COALESCE(pc.name, rc.name), t.type
+      GROUP BY COALESCE(pc.name, rc.name, 'Uncategorized'), t.type
       ORDER BY total_amount DESC
     `;
 
@@ -180,17 +176,17 @@ router.get('/balance-trend', authenticateToken, async (req, res) => {
   try {
     const { period = 'monthly', limit = 12 } = req.query;
 
-    const groupBy = getDateGroupExpr(period);
+    const periodExpr = getPeriodGroupExpr(period);
 
     const query = `
       SELECT 
-        ${groupBy} as period,
+        ${periodExpr} as period,
         MAX(t.balance) as closing_balance,
         MIN(t.balance) as opening_balance,
         COUNT(*) as transaction_count
       FROM transactions t
-      GROUP BY ${groupBy}
-      ORDER BY ${groupBy} DESC
+      GROUP BY ${periodExpr}
+      ORDER BY period DESC
       LIMIT ?
     `;
 
@@ -199,14 +195,14 @@ router.get('/balance-trend', authenticateToken, async (req, res) => {
     const trendData = { labels: [], balances: [], openingBalances: [], closingBalances: [] };
 
     result.rows.reverse().forEach(row => {
-      const date = new Date(row.period);
       let label;
       if (period === 'daily') {
+        const date = new Date(`${row.period}T12:00:00`);
         label = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
       } else if (period === 'weekly') {
-        const weekNum = Math.ceil((date.getDate() - date.getDay()) / 7);
-        label = `Week ${weekNum}`;
+        label = String(row.period);
       } else {
+        const date = new Date(`${row.period}-01T12:00:00`);
         label = date.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
       }
       trendData.labels.push(label);

@@ -25,6 +25,10 @@ class Statement {
             s.epp_balance,
             s.balance_transfer,
             s.payment_status,
+            s.attachment_name,
+            s.attachment_storage_key,
+            s.attachment_url,
+            s.attachment_cloudinary_public_id,
             s.created_at,
             s.updated_at,
             c.id as card_id,
@@ -69,6 +73,10 @@ class Statement {
             s.epp_balance,
             s.balance_transfer,
             s.payment_status,
+            s.attachment_name,
+            s.attachment_storage_key,
+            s.attachment_url,
+            s.attachment_cloudinary_public_id,
             s.created_at,
             s.updated_at,
             c.id as card_id,
@@ -122,6 +130,10 @@ class Statement {
           s.epp_balance,
           s.balance_transfer,
           s.payment_status,
+          s.attachment_name,
+          s.attachment_storage_key,
+          s.attachment_url,
+          s.attachment_cloudinary_public_id,
           s.created_at,
           s.updated_at,
           c.id as card_id,
@@ -167,6 +179,10 @@ class Statement {
           s.epp_balance,
           s.balance_transfer,
           s.payment_status,
+          s.attachment_name,
+          s.attachment_storage_key,
+          s.attachment_url,
+          s.attachment_cloudinary_public_id,
           s.created_at,
           s.updated_at,
           c.id as card_id,
@@ -236,7 +252,8 @@ class Statement {
       );
 
       const fetchResult = await pool.query(
-        'SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, payment_status, created_at, updated_at FROM card_statements WHERE id = ?',
+        `SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, payment_status,
+          attachment_name, attachment_storage_key, attachment_url, attachment_cloudinary_public_id, created_at, updated_at FROM card_statements WHERE id = ?`,
         [id]
       );
       const statement = fetchResult.rows[0];
@@ -279,7 +296,11 @@ class Statement {
         eppBalance,
         balanceTransfer,
         pendingAmount,
-        paymentStatus
+        paymentStatus,
+        attachmentName,
+        attachmentStorageKey,
+        attachmentUrl,
+        attachmentCloudinaryPublicId
       } = statementData;
 
       const fields = [];
@@ -295,6 +316,13 @@ class Statement {
       if (balanceTransfer !== undefined) { fields.push('balance_transfer = ?'); values.push(balanceTransfer); }
       if (pendingAmount !== undefined) { fields.push('pending_amount = ?'); values.push(pendingAmount); }
       if (paymentStatus !== undefined) { fields.push('payment_status = ?'); values.push(paymentStatus); }
+      if (attachmentName !== undefined) { fields.push('attachment_name = ?'); values.push(attachmentName); }
+      if (attachmentStorageKey !== undefined) { fields.push('attachment_storage_key = ?'); values.push(attachmentStorageKey); }
+      if (attachmentUrl !== undefined) { fields.push('attachment_url = ?'); values.push(attachmentUrl); }
+      if (attachmentCloudinaryPublicId !== undefined) {
+        fields.push('attachment_cloudinary_public_id = ?');
+        values.push(attachmentCloudinaryPublicId);
+      }
 
       if (fields.length === 0) return await this.getById(id);
 

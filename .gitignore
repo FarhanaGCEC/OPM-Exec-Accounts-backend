@@ -30,6 +30,9 @@ Thumbs.db
 dist/
 build/
 
+# Uploaded statement PDFs (local dev)
+uploads/
+
 
 
 

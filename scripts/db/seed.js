@@ -6,12 +6,23 @@ const { pool, initDatabase } = require('../../src/config/database');
 async function ensureAdminUser() {
   const username = process.env.SEED_ADMIN_USERNAME || 'admin';
   const password = process.env.SEED_ADMIN_PASSWORD || 'admin123';
+  const hashed = await bcrypt.hash(password, 10);
 
   const existing = await pool.query('SELECT id FROM users WHERE username = ? LIMIT 1', [username]);
-  if (existing.rows.length) return { created: false, username };
+  if (existing.rows.length) {
+    await pool.query('UPDATE users SET role = ?, password = ? WHERE id = ?', [
+      'admin',
+      hashed,
+      existing.rows[0].id,
+    ]);
+    return { created: false, username };
+  }
 
-  const hashed = await bcrypt.hash(password, 10);
-  await pool.query('INSERT INTO users (username, password) VALUES (?, ?)', [username, hashed]);
+  await pool.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [
+    username,
+    hashed,
+    'admin',
+  ]);
   return { created: true, username, password: process.env.SEED_ADMIN_PASSWORD ? '(from env)' : 'admin123' };
 }
 
