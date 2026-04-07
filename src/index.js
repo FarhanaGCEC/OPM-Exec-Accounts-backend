@@ -94,7 +94,10 @@ const jsonParser = express.json({
     return /json|\+json|javascript/i.test(ct);
   },
 });
-const urlencodedParser = express.urlencoded({ extended: true });
+const urlencodedParser = express.urlencoded({
+  extended: true,
+  type: (req) => /^application\/x-www-form-urlencoded/i.test(String(req.headers['content-type'] || '').split(';')[0].trim())
+});
 
 app.use((req, res, next) => {
   const m = normalizeHttpMethod(req);

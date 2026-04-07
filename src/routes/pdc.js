@@ -80,6 +80,20 @@ function collectMissingPdcFields({ chequeDate, chequeNumber, customerName, amoun
   return missing;
 }
 
+/** Explains common "works locally, fails in prod" multipart issues (empty req.body, wrong Content-Type). */
+function pdcMultipartValidationHint(req) {
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  if (!ct.includes('multipart/form-data')) return undefined;
+  if (!ct.includes('boundary=')) {
+    return 'Multipart is missing boundary in Content-Type. Do not set Content-Type manually on FormData requests—let the browser set multipart/form-data with boundary=.... Manual multipart/form-data without boundary yields an empty body on the server.';
+  }
+  const keys = Object.keys(req.body || {});
+  if (keys.length === 0) {
+    return 'Multipart boundary looks valid but no fields were parsed (empty body). Common causes: reverse-proxy / serverless eating the raw body before Multer, or an API client stripping form fields. Try POST with Content-Type: application/json (no file) to confirm, or adjust hosting (e.g. disable default body parsing for this route).';
+  }
+  return undefined;
+}
+
 async function finalizePdcAttachment(req, pdcId, prevCloudinaryPublicId = null) {
   if (!req.file) {
     return { ok: true };
@@ -391,7 +405,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
 });
 
 // Create a new PDC (JSON body, or multipart/form-data with same fields + optional file field `attachment`)
-router.post('/', authenticateToken, optionalPdcImageMultipart, async (req, res) => {
+// Parse multipart before auth so the request stream is consumed immediately (avoids empty req.body on some proxies when auth defers next()).
+router.post('/', optionalPdcImageMultipart, authenticateToken, async (req, res) => {
   try {
     const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = normalizePdcInput(
       req.body
@@ -406,10 +421,14 @@ router.post('/', authenticateToken, optionalPdcImageMultipart, async (req, res) 
       pdcType
     });
     if (missing.length > 0) {
+      const hint = pdcMultipartValidationHint(req);
       return res.status(400).json({
         success: false,
         error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required',
-        missingFields: missing
+        missingFields: missing,
+        ...(hint && { hint }),
+        // Safe minimal debug for live: confirms whether Multer populated fields
+        receivedBodyFieldCount: Object.keys(req.body || {}).length
       });
     }
 
@@ -524,10 +543,13 @@ const updatePdcHandler = async (req, res) => {
       pdcType
     });
     if (missingUpdate.length > 0) {
+      const hint = pdcMultipartValidationHint(req);
       return res.status(400).json({
         success: false,
         error: 'Cheque date, cheque number, customer name, amount, cheque type, and PDC type are required',
-        missingFields: missingUpdate
+        missingFields: missingUpdate,
+        ...(hint && { hint }),
+        receivedBodyFieldCount: Object.keys(req.body || {}).length
       });
     }
 
@@ -612,12 +634,18 @@ const updatePdcHandler = async (req, res) => {
 };
 
 // Update a PDC (PUT or PATCH — JSON or multipart + optional `attachment`)
-router.put('/:id', authenticateToken, requireElevatedForMutation, optionalPdcImageMultipart, updatePdcHandler);
-router.patch(
+router.put(
   '/:id',
+  optionalPdcImageMultipart,
   authenticateToken,
   requireElevatedForMutation,
+  updatePdcHandler
+);
+router.patch(
+  '/:id',
   optionalPdcImageMultipart,
+  authenticateToken,
+  requireElevatedForMutation,
   updatePdcHandler
 );
 
