@@ -93,8 +93,8 @@ const jsonParser = express.json({
     const ct = req.headers['content-type'] || '';
     return /json|\+json|javascript/i.test(ct);
   },
-  // PDC and others may send base64 images in JSON; default 100kb is too small.
-  limit: process.env.JSON_BODY_LIMIT || '25mb',
+  // PDC base64 images blow past the library default (~100kb). Set JSON_BODY_LIMIT if you need bigger (e.g. 100mb).
+  limit: process.env.JSON_BODY_LIMIT || '50mb',
 });
 const urlencodedParser = express.urlencoded({
   extended: true,
@@ -122,6 +122,20 @@ app.use((req, res, next) => {
   jsonParser(req, res, (err) => {
     if (err) {
       const msg = err.message != null ? String(err.message) : String(err);
+      const tooLarge =
+        err.status === 413 ||
+        err.statusCode === 413 ||
+        err.type === 'entity.too.large' ||
+        /entity too large|request entity too large/i.test(msg);
+      if (tooLarge) {
+        return res.status(413).json({
+          success: false,
+          error: 'Request body too large',
+          details: msg,
+          hint:
+            'On the API server set JSON_BODY_LIMIT (e.g. JSON_BODY_LIMIT=100mb) and restart. If nginx/Cloudflare sits in front, raise client_max_body_size / upload limit. Prefer multipart field attachment for large images instead of base64 inside JSON.',
+        });
+      }
       return res.status(400).json({
         success: false,
         error: 'Invalid or malformed JSON body',

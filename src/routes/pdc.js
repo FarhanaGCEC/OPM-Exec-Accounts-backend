@@ -12,6 +12,7 @@ const {
   isCloudinaryConfigured
 } = require('../services/cloudinaryPdcUpload');
 const { pdcImageUploadMiddleware, optionalPdcImageMultipart } = require('../middleware/pdcAttachmentUpload');
+const { buildPdcAttachmentPayload, normalizeMediaUrl } = require('../utils/attachmentPayload');
 
 const MAX_PDC_IMAGE_BYTES = 15 * 1024 * 1024;
 const PDC_IMAGE_FILENAME_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
@@ -20,9 +21,7 @@ const router = express.Router();
 
 function formatPdcForApi(pdc) {
   if (!pdc) return pdc;
-  const attachment = pdc.attachment_url
-    ? { name: pdc.attachment_name || 'cheque-image', url: pdc.attachment_url }
-    : null;
+  const attachment = buildPdcAttachmentPayload(pdc);
   const {
     attachment_name,
     attachment_url,
@@ -423,14 +422,15 @@ router.get('/:id/attachment', authenticateToken, async (req, res) => {
       });
     }
 
-    if (!pdc.attachment_url) {
+    const mediaUrl = normalizeMediaUrl(pdc.attachment_url);
+    if (!mediaUrl) {
       return res.status(404).json({
         success: false,
         error: 'No cheque image attached'
       });
     }
 
-    res.redirect(302, pdc.attachment_url);
+    res.redirect(302, mediaUrl);
   } catch (error) {
     console.error('Error resolving PDC attachment:', error);
     res.status(500).json({

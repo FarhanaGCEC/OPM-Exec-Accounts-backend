@@ -10,6 +10,10 @@ const {
   destroyStatementPdf,
   isCloudinaryConfigured
 } = require('../services/cloudinaryStatementUpload');
+const {
+  buildStatementAttachmentPayload: buildAttachmentPayload,
+  normalizeMediaUrl
+} = require('../utils/attachmentPayload');
 
 /** Older attachments saved on disk before Cloudinary */
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
@@ -20,23 +24,6 @@ async function resolveStatementForAttachment(id, month) {
   }
   return Statement.getById(id);
 }
-
-const buildAttachmentPayload = (row) => {
-  if (!row || !row.id) return null;
-  if (row.attachment_url) {
-    return {
-      name: row.attachment_name || 'statement.pdf',
-      url: row.attachment_url
-    };
-  }
-  if (row.attachment_storage_key) {
-    return {
-      name: row.attachment_name || 'statement.pdf',
-      url: `/api/statements/${row.id}/attachment`
-    };
-  }
-  return null;
-};
 
 /** UI may echo GET list values: "12,345.67" → number */
 function normalizeStatementAmount(raw) {
@@ -1022,7 +1009,10 @@ class StatementController {
       }
 
       if (row.attachment_url) {
-        return res.redirect(302, row.attachment_url);
+        const mediaUrl = normalizeMediaUrl(row.attachment_url);
+        if (mediaUrl) {
+          return res.redirect(302, mediaUrl);
+        }
       }
 
       if (!row.attachment_storage_key) {
