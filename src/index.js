@@ -93,6 +93,8 @@ const jsonParser = express.json({
     const ct = req.headers['content-type'] || '';
     return /json|\+json|javascript/i.test(ct);
   },
+  // PDC and others may send base64 images in JSON; default 100kb is too small.
+  limit: process.env.JSON_BODY_LIMIT || '25mb',
 });
 const urlencodedParser = express.urlencoded({
   extended: true,
