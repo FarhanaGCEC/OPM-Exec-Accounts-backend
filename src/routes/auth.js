@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { USER_ROLES } = require('../constants/roles');
 const { JWT_SECRET } = require('../middleware/auth');
+const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
 
 const router = express.Router();
 
@@ -64,6 +65,10 @@ router.post('/signup', async (req, res) => {
         id: user.id,
         username: user.username,
         role: user.role,
+        sidebarPermissions: effectiveSidebarPermissions(
+          user.role,
+          user.sidebarPermissionsStored
+        ),
       },
     });
   } catch (error) {
@@ -118,6 +123,10 @@ router.post('/login', async (req, res) => {
         id: user.id,
         username: user.username,
         role: user.role,
+        sidebarPermissions: effectiveSidebarPermissions(
+          user.role,
+          user.sidebarPermissionsStored
+        ),
       },
     });
   } catch (error) {

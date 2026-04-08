@@ -1,7 +1,12 @@
 const express = require('express');
 const PurchaseBill = require('../models/PurchaseBill');
 const { authenticateToken } = require('../middleware/auth');
-const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const { USER_ROLES } = require('../constants/roles');
+const {
+  queuePurchaseBillDelete,
+  queuePurchaseBillPut,
+  queuePurchaseBillPatch,
+} = require('../controllers/purchaseBillChangeRequestQueue');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
@@ -158,7 +163,10 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // Update a purchase bill (full update)
-router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queuePurchaseBillPut(req, res);
+  }
   try {
     const { id } = req.params;
     const { bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status } = req.body;
@@ -263,7 +271,10 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
 });
 
 // Partial update a purchase bill
-router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.patch('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queuePurchaseBillPatch(req, res);
+  }
   try {
     const { id } = req.params;
     const { bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status } = req.body;
@@ -375,7 +386,10 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
 });
 
 // Delete a purchase bill
-router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.delete('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queuePurchaseBillDelete(req, res);
+  }
   try {
     const { id } = req.params;
     const deleted = await PurchaseBill.delete(id);

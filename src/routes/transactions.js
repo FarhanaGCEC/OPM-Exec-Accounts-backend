@@ -2,6 +2,11 @@ const express = require('express');
 const Transaction = require('../models/Transaction');
 const { authenticateToken } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const { USER_ROLES } = require('../constants/roles');
+const {
+  queueTransactionDelete,
+  queueTransactionPut,
+} = require('../controllers/transactionChangeRequestQueue');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const { pool } = require('../config/database');
 const {
@@ -710,8 +715,10 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put(
   '/:id',
   authenticateToken,
-  requireElevatedForMutation,
   async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queueTransactionPut(req, res);
+  }
   try {
     const { id } = req.params;
     const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
@@ -813,8 +820,10 @@ router.put(
 router.delete(
   '/:id',
   authenticateToken,
-  requireElevatedForMutation,
   async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queueTransactionDelete(req, res);
+  }
   try {
     const { id } = req.params;
     const deleted = await Transaction.delete(id);

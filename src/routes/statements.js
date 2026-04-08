@@ -50,36 +50,31 @@ router.get(
 router.post(
   '/:id/attachment',
   authenticateToken,
-  requireElevatedForMutation,
   statementPdfUploadMiddleware,
   StatementController.uploadStatementAttachment
 );
 router.delete(
   '/:id/attachment',
   authenticateToken,
-  requireElevatedForMutation,
   StatementController.deleteStatementAttachment
 );
 
-// POST/PUT/PATCH /api/statements/:id — JSON or multipart/form-data (text fields + optional PDF `attachment`)
+// POST/PUT/PATCH: admin/accountant apply immediately; standard user queues change request (202).
 router.post(
   '/:id',
   authenticateToken,
-  requireElevatedForMutation,
   optionalStatementPdfMultipart,
   StatementController.updateStatement
 );
 router.put(
   '/:id',
   authenticateToken,
-  requireElevatedForMutation,
   optionalStatementPdfMultipart,
   StatementController.updateStatement
 );
 router.patch(
   '/:id',
   authenticateToken,
-  requireElevatedForMutation,
   optionalStatementPdfMultipart,
   StatementController.updateStatement
 );

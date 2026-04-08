@@ -10,6 +10,16 @@ const adminOnly = [authenticateToken, authorizeRoles(USER_ROLES.ADMIN)];
 const adminOnlySse = [authenticateTokenOrQuery, authorizeRoles(USER_ROLES.ADMIN)];
 
 router.get('/users', ...adminOnly, adminController.listUsers);
+router.get(
+  '/users/:id/sidebar-permissions',
+  ...adminOnly,
+  adminController.getUserSidebarPermissions
+);
+router.put(
+  '/users/:id/sidebar-permissions',
+  ...adminOnly,
+  adminController.updateUserSidebarPermissions
+);
 router.post('/create-user', ...adminOnly, adminController.createUser);
 router.put('/update-password/:id', ...adminOnly, adminController.updatePassword);
 router.put('/update-role/:id', ...adminOnly, adminController.updateUserRole);

@@ -2,14 +2,26 @@ const Transaction = require('../models/Transaction');
 const ChangeRequest = require('../models/ChangeRequest');
 const PayablesCategory = require('../models/PayablesCategory');
 const ReceivablesCategory = require('../models/ReceivablesCategory');
+const PurchaseBill = require('../models/PurchaseBill');
 const changeRequestEvents = require('../services/changeRequestEvents');
+const { USER_ROLES } = require('../constants/roles');
+const User = require('../models/User');
+const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
+const {
+  resolveCardStatementRow,
+  statementPayloadToUpdateData,
+  payloadHasRemoveAttachment,
+} = require('../services/cardStatementRequestApply');
+const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
+const {
+  normalizeTransactionEditPayload,
+  assertTransactionEditRequired,
+} = require('../utils/transactionChangePayload');
+const { validateAndBuildPdcUpdate } = require('../utils/pdcChangeRequestPayload');
+const PDC = require('../models/PDC');
+const { CHANGE_REQUEST_RESOURCE_TYPES } = require('../constants/changeRequestResourceTypes');
 
-const ALLOWED_TYPES = new Set([
-  'transaction',
-  'user_self',
-  'payables_category',
-  'receivables_category',
-]);
+const ALLOWED_TYPES = new Set(CHANGE_REQUEST_RESOURCE_TYPES);
 
 async function submitChangeRequest(req, res) {
   const action = String(req.body.action || '').toLowerCase();
@@ -65,13 +77,28 @@ async function submitChangeRequest(req, res) {
       if (txn.created_by != null && Number(txn.created_by) !== Number(req.user.id)) {
         return res.status(403).json({ error: 'You can only request changes for your own transactions' });
       }
+      if (req.user.role === USER_ROLES.USER) {
+        const dbUser = await User.findById(req.user.id);
+        if (!dbUser) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        const perms = effectiveSidebarPermissions(dbUser.role, dbUser.sidebarPermissionsStored);
+        if (!perms.daily_transactions) {
+          return res.status(403).json({
+            code: 'SIDEBAR_PERMISSION_REQUIRED',
+            error: 'Daily Transactions access is required to submit transaction change requests.',
+          });
+        }
+      }
       if (action === 'edit') {
-        const required = ['date', 'type', 'amount', 'paymentType'];
-        const p = payload && typeof payload === 'object' ? payload : {};
-        for (const k of required) {
-          if (p[k] === undefined || p[k] === null) {
-            return res.status(400).json({ error: `payload.${k} is required for edit` });
-          }
+        try {
+          const norm = normalizeTransactionEditPayload(payload || {});
+          assertTransactionEditRequired(norm);
+        } catch (e) {
+          return res.status(400).json({
+            error: e.message,
+            hint: 'Use payment_type or paymentType, category_id or categoryId, cheque_number or chequeNumber.',
+          });
         }
       }
     }
@@ -102,6 +129,124 @@ async function submitChangeRequest(req, res) {
         const name = payload && (payload.name ?? payload.Name);
         if (!name || String(name).trim() === '') {
           return res.status(400).json({ error: 'payload.name is required for edit' });
+        }
+      }
+    }
+
+    if (resourceType === 'card_statement') {
+      if (req.user.role === USER_ROLES.USER) {
+        const dbUser = await User.findById(req.user.id);
+        if (!dbUser) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        const perms = effectiveSidebarPermissions(dbUser.role, dbUser.sidebarPermissionsStored);
+        if (!perms.credit_cards) {
+          return res.status(403).json({
+            code: 'SIDEBAR_PERMISSION_REQUIRED',
+            error: 'Credit Cards access is required to request statement changes.',
+          });
+        }
+      }
+      try {
+        await resolveCardStatementRow(resourceId, payload && typeof payload === 'object' ? payload : {});
+      } catch (e) {
+        return res.status(400).json({
+          error: e.message || 'Invalid card_statement target (need statement id or card id + payload.statementMonth)',
+        });
+      }
+      if (action === 'edit') {
+        const p = payload && typeof payload === 'object' ? payload : {};
+        let updateKeys;
+        try {
+          updateKeys = statementPayloadToUpdateData(p);
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        if (!payloadHasRemoveAttachment(p) && Object.keys(updateKeys).length === 0) {
+          return res.status(400).json({
+            error:
+              'For card_statement edit, payload must include fields (e.g. total_due, paid_amount, statement_date as YYYY-MM-DD) and/or removeAttachment: true',
+          });
+        }
+      }
+    }
+
+    if (resourceType === 'purchase_bill') {
+      const pid = parseInt(resourceId, 10);
+      if (!Number.isInteger(pid) || pid < 1) {
+        return res.status(400).json({ error: 'Invalid purchase bill id' });
+      }
+      const billRow = await PurchaseBill.getById(pid);
+      if (!billRow) {
+        return res.status(404).json({ error: 'Purchase bill not found' });
+      }
+      if (req.user.role === USER_ROLES.USER) {
+        const dbUser = await User.findById(req.user.id);
+        if (!dbUser) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        const perms = effectiveSidebarPermissions(dbUser.role, dbUser.sidebarPermissionsStored);
+        if (!perms.credit_cards) {
+          return res.status(403).json({
+            code: 'SIDEBAR_PERMISSION_REQUIRED',
+            error: 'Credit Cards access is required to request purchase bill changes.',
+          });
+        }
+        if (billRow.created_by != null && Number(billRow.created_by) !== Number(req.user.id)) {
+          return res.status(403).json({
+            error: 'You can only request changes for purchase bills you created',
+          });
+        }
+      }
+      if (action === 'edit') {
+        try {
+          const keys = payloadToPurchaseBillUpdate(payload || {}, { requireBillDateAndAmount: false });
+          if (Object.keys(keys).length === 0) {
+            return res.status(400).json({
+              error:
+                'For purchase_bill edit, include at least one of: bill_date, amount, invoice_number, vendor_name, bill_number, payment_method, description, payment_status',
+            });
+          }
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+      }
+    }
+
+    if (resourceType === 'post_dated_cheque') {
+      const pid = parseInt(resourceId, 10);
+      if (!Number.isInteger(pid) || pid < 1) {
+        return res.status(400).json({ error: 'Invalid post-dated cheque id' });
+      }
+      const pdcRow = await PDC.getById(pid);
+      if (!pdcRow) {
+        return res.status(404).json({ error: 'Post-dated cheque not found' });
+      }
+      if (req.user.role === USER_ROLES.USER) {
+        const dbUser = await User.findById(req.user.id);
+        if (!dbUser) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        const perms = effectiveSidebarPermissions(dbUser.role, dbUser.sidebarPermissionsStored);
+        if (!perms.post_dated_cheques) {
+          return res.status(403).json({
+            code: 'SIDEBAR_PERMISSION_REQUIRED',
+            error: 'Post-Dated Cheques access is required.',
+          });
+        }
+        if (pdcRow.created_by != null && Number(pdcRow.created_by) !== Number(req.user.id)) {
+          return res.status(403).json({
+            error: 'You can only request changes for PDCs you created',
+          });
+        }
+      }
+      if (action === 'edit') {
+        const built = validateAndBuildPdcUpdate(payload || {});
+        if (!built.ok) {
+          return res.status(400).json({
+            error: built.error,
+            ...(built.missingFields && { missingFields: built.missingFields }),
+          });
         }
       }
     }
@@ -139,7 +284,25 @@ async function submitChangeRequest(req, res) {
 async function listMyChangeRequests(req, res) {
   try {
     const list = await ChangeRequest.listForRequester(req.user.id);
-    return res.json({ requests: list });
+    const requesterId = Number(req.user.id);
+    const payload = {
+      success: true,
+      requests: list,
+      changeRequests: list,
+      meta: {
+        requesterId,
+        username: req.user.username,
+        role: req.user.role,
+      },
+    };
+    if (
+      list.length === 0 &&
+      (req.user.role === USER_ROLES.ADMIN || req.user.role === USER_ROLES.ACCOUNTANT)
+    ) {
+      payload.hint =
+        'This route only lists change requests that you submitted yourself. To review everyone’s pending requests as an admin, use GET /api/admin/change-requests.';
+    }
+    return res.json(payload);
   } catch (error) {
     console.error('listMyChangeRequests:', error);
     return res.status(500).json({ error: 'Internal server error' });

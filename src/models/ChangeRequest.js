@@ -38,12 +38,16 @@ class ChangeRequest {
     payload,
     requestNote,
   }) {
+    const rid = Number(requesterId);
+    if (!Number.isInteger(rid) || rid < 1) {
+      throw new Error('Invalid requester id');
+    }
     const payloadJson = payload == null ? null : JSON.stringify(payload);
     const insertResult = await pool.query(
       `INSERT INTO change_requests
        (requester_id, action, resource_type, resource_id, payload, request_note, status)
        VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [requesterId, action, resourceType, resourceId, payloadJson, requestNote || null]
+      [rid, action, resourceType, resourceId, payloadJson, requestNote || null]
     );
     if (!insertResult.insertId) {
       throw new Error('Failed to create change request');
@@ -63,13 +67,17 @@ class ChangeRequest {
   }
 
   static async listForRequester(requesterId) {
+    const rid = Number(requesterId);
+    if (!Number.isInteger(rid) || rid < 1) {
+      return [];
+    }
     const result = await pool.query(
       `SELECT cr.*, u.username AS requester_username
        FROM change_requests cr
        LEFT JOIN users u ON u.id = cr.requester_id
        WHERE cr.requester_id = ?
        ORDER BY cr.created_at DESC`,
-      [requesterId]
+      [rid]
     );
     return result.rows.map((r) => mapRow(r));
   }

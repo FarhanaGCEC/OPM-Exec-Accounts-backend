@@ -3,6 +3,8 @@ const express = require('express');
 const PDC = require('../models/PDC');
 const { authenticateToken } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const { USER_ROLES } = require('../constants/roles');
+const { queuePdcDelete, queuePdcUpdate } = require('../controllers/pdcChangeRequestQueue');
 
 const { isGcecPdcType, parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
@@ -747,6 +749,12 @@ router.put(
   '/:id',
   optionalPdcImageMultipart,
   authenticateToken,
+  (req, res, next) => {
+    if (req.user && req.user.role === USER_ROLES.USER) {
+      return queuePdcUpdate(req, res);
+    }
+    next();
+  },
   requireElevatedForMutation,
   updatePdcHandler
 );
@@ -754,12 +762,28 @@ router.patch(
   '/:id',
   optionalPdcImageMultipart,
   authenticateToken,
+  (req, res, next) => {
+    if (req.user && req.user.role === USER_ROLES.USER) {
+      return queuePdcUpdate(req, res);
+    }
+    next();
+  },
   requireElevatedForMutation,
   updatePdcHandler
 );
 
 // Delete a PDC
-router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.delete(
+  '/:id',
+  authenticateToken,
+  (req, res, next) => {
+    if (req.user && req.user.role === USER_ROLES.USER) {
+      return queuePdcDelete(req, res);
+    }
+    next();
+  },
+  requireElevatedForMutation,
+  async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await PDC.getById(id);

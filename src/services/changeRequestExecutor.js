@@ -2,6 +2,16 @@ const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const PayablesCategory = require('../models/PayablesCategory');
 const ReceivablesCategory = require('../models/ReceivablesCategory');
+const { applyApprovedCardStatementRequest } = require('./cardStatementRequestApply');
+const PurchaseBill = require('../models/PurchaseBill');
+const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
+const {
+  normalizeTransactionEditPayload,
+  assertTransactionEditRequired,
+} = require('../utils/transactionChangePayload');
+const { validateAndBuildPdcUpdate } = require('../utils/pdcChangeRequestPayload');
+const PDC = require('../models/PDC');
+const { destroyPdcChequeImage } = require('../services/cloudinaryPdcUpload');
 
 function parsePayload(reqRow) {
   const p = reqRow.payload;
@@ -46,20 +56,16 @@ async function executeApprovedRequest(reqRow) {
       return;
     }
     if (action === 'edit') {
-      const required = ['date', 'type', 'amount', 'paymentType'];
-      for (const k of required) {
-        if (payload[k] === undefined || payload[k] === null) {
-          throw new Error(`Payload missing: ${k}`);
-        }
-      }
+      const norm = normalizeTransactionEditPayload(payload);
+      assertTransactionEditRequired(norm);
       const updated = await Transaction.update(id, {
-        date: payload.date,
-        type: payload.type,
-        categoryId: payload.categoryId,
-        paymentType: payload.paymentType,
-        chequeNumber: payload.chequeNumber,
-        amount: payload.amount,
-        remarks: payload.remarks,
+        date: norm.date,
+        type: norm.type,
+        categoryId: norm.categoryId,
+        paymentType: norm.paymentType,
+        chequeNumber: norm.chequeNumber,
+        amount: norm.amount,
+        remarks: norm.remarks,
       });
       if (!updated) throw new Error('Failed to update transaction');
       return;
@@ -100,6 +106,68 @@ async function executeApprovedRequest(reqRow) {
       if (!name) throw new Error('payload.name is required');
       const updated = await ReceivablesCategory.update(id, name);
       if (!updated) throw new Error('Failed to update receivables category');
+      return;
+    }
+  }
+
+  if (resourceType === 'card_statement') {
+    await applyApprovedCardStatementRequest({
+      action,
+      resourceId,
+      payload,
+    });
+    return;
+  }
+
+  if (resourceType === 'post_dated_cheque') {
+    const id = parseInt(resourceId, 10);
+    if (!Number.isInteger(id) || id < 1) {
+      throw new Error('Invalid post-dated cheque id');
+    }
+    const row = await PDC.getById(id);
+    if (!row) throw new Error('Post-dated cheque not found');
+    if (action === 'delete') {
+      if (row.attachment_cloudinary_public_id) {
+        try {
+          await destroyPdcChequeImage(row.attachment_cloudinary_public_id);
+        } catch (e) {
+          console.error('destroyPdcChequeImage on approved delete:', e.message);
+        }
+      }
+      const ok = await PDC.delete(id);
+      if (!ok) throw new Error('Failed to delete post-dated cheque');
+      return;
+    }
+    if (action === 'edit') {
+      const built = validateAndBuildPdcUpdate(payload);
+      if (!built.ok) {
+        throw new Error(built.error || 'Invalid PDC payload');
+      }
+      const updated = await PDC.update(id, built.value);
+      if (!updated) throw new Error('Failed to update post-dated cheque');
+      return;
+    }
+  }
+
+  if (resourceType === 'purchase_bill') {
+    const id = parseInt(resourceId, 10);
+    if (!Number.isInteger(id) || id < 1) {
+      throw new Error('Invalid purchase bill id');
+    }
+    const row = await PurchaseBill.getById(id);
+    if (!row) throw new Error('Purchase bill not found');
+    if (action === 'delete') {
+      const ok = await PurchaseBill.delete(id);
+      if (!ok) throw new Error('Failed to delete purchase bill');
+      return;
+    }
+    if (action === 'edit') {
+      const u = payloadToPurchaseBillUpdate(payload, { requireBillDateAndAmount: false });
+      if (Object.keys(u).length === 0) {
+        throw new Error('Empty purchase bill update payload');
+      }
+      const updated = await PurchaseBill.update(id, u);
+      if (!updated) throw new Error('Failed to update purchase bill');
       return;
     }
   }

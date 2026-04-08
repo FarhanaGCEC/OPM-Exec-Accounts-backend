@@ -1,4 +1,18 @@
 const { pool } = require('../config/database');
+const { parseStoredPermissions, normalizePermissionsInput } = require('../constants/sidebarPermissions');
+
+function mapUserRow(user) {
+  if (!user) return null;
+  const raw = user.sidebar_permissions;
+  return {
+    id: user.id,
+    username: user.username,
+    password: user.password,
+    role: user.role || 'user',
+    createdAt: user.created_at,
+    sidebarPermissionsStored: parseStoredPermissions(raw),
+  };
+}
 
 class User {
   static async create(username, password, role = 'user') {
@@ -13,15 +27,17 @@ class User {
         [username, password, role]
       );
       const result = await pool.query(
-        'SELECT id, username, role, created_at FROM users WHERE username = ?',
+        'SELECT id, username, role, created_at, sidebar_permissions FROM users WHERE username = ?',
         [username]
       );
 
+      const row = result.rows[0];
       return {
-        id: result.rows[0].id,
-        username: result.rows[0].username,
-        role: result.rows[0].role,
-        createdAt: result.rows[0].created_at,
+        id: row.id,
+        username: row.username,
+        role: row.role,
+        createdAt: row.created_at,
+        sidebarPermissionsStored: parseStoredPermissions(row.sidebar_permissions),
       };
     } catch (error) {
       if (error.code === 'ER_DUP_ENTRY') {
@@ -34,7 +50,7 @@ class User {
   static async findByUsername(username) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, role, created_at FROM users WHERE username = ?',
+        'SELECT id, username, password, role, created_at, sidebar_permissions FROM users WHERE username = ?',
         [username]
       );
 
@@ -42,14 +58,7 @@ class User {
         return null;
       }
 
-      const user = result.rows[0];
-      return {
-        id: user.id,
-        username: user.username,
-        password: user.password,
-        role: user.role || 'user',
-        createdAt: user.created_at,
-      };
+      return mapUserRow(result.rows[0]);
     } catch (error) {
       throw error;
     }
@@ -58,7 +67,7 @@ class User {
   static async findById(id) {
     try {
       const result = await pool.query(
-        'SELECT id, username, password, role, created_at FROM users WHERE id = ?',
+        'SELECT id, username, password, role, created_at, sidebar_permissions FROM users WHERE id = ?',
         [id]
       );
 
@@ -66,14 +75,7 @@ class User {
         return null;
       }
 
-      const user = result.rows[0];
-      return {
-        id: user.id,
-        username: user.username,
-        password: user.password,
-        role: user.role || 'user',
-        createdAt: user.created_at,
-      };
+      return mapUserRow(result.rows[0]);
     } catch (error) {
       throw error;
     }
@@ -83,9 +85,21 @@ class User {
   static async getAll() {
     try {
       const result = await pool.query(
-        'SELECT id, username, role, created_at FROM users ORDER BY created_at DESC'
+        'SELECT id, username, role, created_at, sidebar_permissions FROM users ORDER BY created_at DESC'
       );
-      return result.rows;
+      return result.rows.map((row) => {
+        const u = mapUserRow({ ...row, password: undefined });
+        delete u.password;
+        return {
+          id: u.id,
+          username: u.username,
+          role: u.role,
+          created_at: row.created_at,
+          createdAt: row.created_at,
+          sidebar_permissions: row.sidebar_permissions,
+          sidebarPermissionsStored: u.sidebarPermissionsStored,
+        };
+      });
     } catch (error) {
       throw error;
     }
@@ -130,6 +144,17 @@ class User {
   static async countByRole(role) {
     const result = await pool.query('SELECT COUNT(*) AS c FROM users WHERE role = ?', [role]);
     return parseInt(result.rows[0].c, 10);
+  }
+
+  static async updateSidebarPermissions(id, permissionsObject) {
+    const normalized = normalizePermissionsInput(permissionsObject);
+    const result = await pool.query(
+      'UPDATE users SET sidebar_permissions = ? WHERE id = ?',
+      [JSON.stringify(normalized), id]
+    );
+    if (!result.affectedRows) {
+      throw new Error('User not found');
+    }
   }
 }
 

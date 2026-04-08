@@ -35,8 +35,16 @@ const wrapQuery = (executor) => {
     // mysql2: SELECT returns array of rows, INSERT/UPDATE/DELETE returns ResultSetHeader
     const rows = Array.isArray(result) ? result : [];
     const affectedRows = result && typeof result.affectedRows === 'number' ? result.affectedRows : undefined;
-    const insertId =
-      result && typeof result.insertId === 'number' && result.insertId > 0 ? result.insertId : undefined;
+    let insertId;
+    if (result != null && result.insertId != null && result.insertId !== '') {
+      const n =
+        typeof result.insertId === 'bigint'
+          ? Number(result.insertId)
+          : typeof result.insertId === 'string'
+            ? parseInt(result.insertId, 10)
+            : result.insertId;
+      insertId = Number.isFinite(n) && n > 0 ? n : undefined;
+    }
     return { rows, affectedRows, insertId };
   };
 };
@@ -295,6 +303,12 @@ const initDatabase = async () => {
         await pool.query(`
           ALTER TABLE users
           ADD COLUMN role ENUM('admin', 'accountant', 'user') NOT NULL DEFAULT 'user'
+        `);
+      }
+      if (!(await columnExists('users', 'sidebar_permissions'))) {
+        await pool.query(`
+          ALTER TABLE users
+          ADD COLUMN sidebar_permissions JSON NULL
         `);
       }
     }

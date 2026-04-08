@@ -14,6 +14,11 @@ const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
 } = require('../utils/attachmentPayload');
+const { USER_ROLES } = require('../constants/roles');
+const {
+  normalizeStatementAmount,
+  parseStatementDateInput,
+} = require('../utils/statementPatchParse');
 
 /** Older attachments saved on disk before Cloudinary */
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
@@ -23,59 +28,6 @@ async function resolveStatementForAttachment(id, month) {
     return Statement.getByCardIdAndMonth(id, month);
   }
   return Statement.getById(id);
-}
-
-/** UI may echo GET list values: "12,345.67" → number */
-function normalizeStatementAmount(raw) {
-  if (raw === undefined || raw === null) return undefined;
-  if (typeof raw === 'number' && !Number.isNaN(raw)) return raw;
-  const n = parseFloat(String(raw).replace(/,/g, '').trim());
-  return Number.isNaN(n) ? NaN : n;
-}
-
-/**
- * Accept YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YY (same pattern as list formatDateDDMMYY)
- */
-function parseStatementDateInput(raw) {
-  if (raw === undefined || raw === null || raw === '') return { ok: false, value: null };
-  const s = String(raw).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(`${s}T12:00:00`);
-    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: s };
-  }
-  if (s.includes('/')) {
-    const parts = s.split('/').map((p) => p.trim());
-    if (parts.length !== 3) return { ok: false, value: null };
-    const [a, b, c] = parts;
-    let y;
-    let mo;
-    let day;
-    if (c.length === 4) {
-      day = a.padStart(2, '0');
-      mo = b.padStart(2, '0');
-      y = c;
-    } else {
-      day = a.padStart(2, '0');
-      mo = b.padStart(2, '0');
-      y = c.length === 2 ? (parseInt(c, 10) >= 70 ? `19${c}` : `20${c}`) : c;
-    }
-    const iso = `${y}-${mo}-${day}`;
-    const d = new Date(`${iso}T12:00:00`);
-    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: iso };
-  }
-  const m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
-  if (m) {
-    const day = m[1].padStart(2, '0');
-    const mo = m[2].padStart(2, '0');
-    let y = m[3];
-    if (y.length === 2) {
-      y = parseInt(y, 10) >= 70 ? `19${y}` : `20${y}`;
-    }
-    const iso = `${y}-${mo}-${day}`;
-    const d = new Date(`${iso}T12:00:00`);
-    return isNaN(d.getTime()) ? { ok: false, value: null } : { ok: true, value: iso };
-  }
-  return { ok: false, value: null };
 }
 
 // Helper function to format date as DD-MM-YY
@@ -458,6 +410,11 @@ class StatementController {
   //   - Frontend format: total_payment_due, paid, epp
   static async updateStatement(req, res) {
     try {
+      if (req.user && req.user.role === USER_ROLES.USER) {
+        const { queueStatementFieldChange } = require('./statementChangeRequestQueue');
+        return queueStatementFieldChange(req, res);
+      }
+
       const { id } = req.params;
       const { month } = req.query;
       const b = req.body || {};
@@ -903,6 +860,15 @@ class StatementController {
    */
   static async uploadStatementAttachment(req, res) {
     try {
+      if (req.user && req.user.role === USER_ROLES.USER) {
+        return res.status(400).json({
+          success: false,
+          code: 'APPROVAL_REQUIRED',
+          error:
+            'Standard users cannot attach a PDF directly. Ask an admin to attach the file, or submit amount/date changes via PATCH /api/statements/:id (those are queued for approval automatically).',
+        });
+      }
+
       if (!isCloudinaryConfigured()) {
         return res.status(503).json({
           success: false,
@@ -1052,6 +1018,11 @@ class StatementController {
    */
   static async deleteStatementAttachment(req, res) {
     try {
+      if (req.user && req.user.role === USER_ROLES.USER) {
+        const { queueStatementAttachmentRemoval } = require('./statementChangeRequestQueue');
+        return queueStatementAttachmentRemoval(req, res);
+      }
+
       const { id } = req.params;
       const { month } = req.query;
       const row = await resolveStatementForAttachment(id, month);
