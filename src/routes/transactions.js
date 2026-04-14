@@ -14,8 +14,12 @@ const {
   isCustomerPdcType,
   parseDailyLedgerApproved
 } = require('../utils/pdcLedgerApproval');
+const PDC = require('../models/PDC');
+const PurchaseBill = require('../models/PurchaseBill');
 
 const router = express.Router();
+
+const PDC_DUE_ID_RE = /^pdc-due-(\d+)$/i;
 
 /** Normalize DB/JS dates to YYYY-MM-DD for sorting and comparison */
 function toYmd(d) {
@@ -421,6 +425,115 @@ router.get('/', authenticateToken, async (req, res) => {
 
 const MAX_BULK_TRANSACTIONS = 500;
 
+function addScalarBulkDeleteTarget(value, ledgerIds, pdcIds, invalid, source, index) {
+  if (value == null || value === '') {
+    invalid.push({ source, index, error: 'Empty value' });
+    return;
+  }
+  const s = String(value).trim();
+  const m = PDC_DUE_ID_RE.exec(s);
+  if (m) {
+    pdcIds.add(parseInt(m[1], 10));
+    return;
+  }
+  const n = parseInt(value, 10);
+  if (Number.isInteger(n) && n > 0) {
+    ledgerIds.add(n);
+    return;
+  }
+  invalid.push({
+    source,
+    index,
+    value,
+    error: 'Must be a positive ledger id or a synthetic id like pdc-due-123'
+  });
+}
+
+function transactionTypeLabel(row) {
+  const r = row || {};
+  if (r.transactionType != null) return String(r.transactionType).trim();
+  if (r.transaction_type != null) return String(r.transaction_type).trim();
+  return '';
+}
+
+function addRowBulkDeleteTargets(
+  row,
+  ledgerIds,
+  pdcIds,
+  purchaseBillIds,
+  invalid,
+  source,
+  index
+) {
+  const r = row || {};
+  const tt = transactionTypeLabel(r);
+  const rawId = r.id != null ? r.id : r.Id;
+
+  if (tt === 'GCEC PDC' || tt === 'Customer PDC' || tt === 'Custom PDC') {
+    const n = parseInt(rawId, 10);
+    if (Number.isInteger(n) && n > 0) {
+      pdcIds.add(n);
+      return;
+    }
+    invalid.push({
+      source,
+      index,
+      value: rawId,
+      error: 'GCEC/Customer/Custom PDC rows need a numeric post_dated_cheques id'
+    });
+    return;
+  }
+
+  if (tt === 'Purchase Bill') {
+    const n = parseInt(rawId, 10);
+    if (Number.isInteger(n) && n > 0) {
+      purchaseBillIds.add(n);
+      return;
+    }
+    invalid.push({
+      source,
+      index,
+      value: rawId,
+      error: 'Purchase Bill rows need a numeric purchase_bills id'
+    });
+    return;
+  }
+
+  // Daily Transaction, or rows without type (GET / main AED table)
+  if (rawId != null && rawId !== '') {
+    const s = String(rawId).trim();
+    const m = PDC_DUE_ID_RE.exec(s);
+    if (m) {
+      pdcIds.add(parseInt(m[1], 10));
+      return;
+    }
+    const n = parseInt(rawId, 10);
+    if (Number.isInteger(n) && n > 0) {
+      ledgerIds.add(n);
+      return;
+    }
+    invalid.push({
+      source,
+      index,
+      value: rawId,
+      error: 'id must be a positive ledger id or pdc-due-* (matured PDC on daily list)'
+    });
+    return;
+  }
+  if (r.pdcId != null && r.pdcId !== '') {
+    const pid = parseInt(r.pdcId, 10);
+    if (Number.isInteger(pid) && pid > 0) {
+      pdcIds.add(pid);
+      return;
+    }
+  }
+  invalid.push({
+    source,
+    index,
+    error: 'Each row needs id (ledger, pdc-due-*, or typed id from /all) or pdcId for synthetic PDC'
+  });
+}
+
 function normalizeTransactionDateInput(date) {
   if (date == null) return null;
   let formattedDate = date;
@@ -480,7 +593,7 @@ router.post('/bulk', authenticateToken, async (req, res) => {
       });
     }
 
-    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online', 'dd'];
     const errors = [];
     const normalized = [];
 
@@ -590,6 +703,129 @@ router.post('/bulk', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Bulk delete what the daily transactions UI shows: AED `transactions` rows (numeric id)
+ * and matured PDC lines (`id` like pdc-due-* or `pdcId` from GET /api/transactions).
+ * Body options (same as list payload): { data: [...] } from GET, or { transactions: [...] },
+ * or { ids: [1, "pdc-due-5", ...] }. Admin / accountant only.
+ */
+router.post(
+  '/bulk-delete',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const invalid = [];
+      const ledgerIds = new Set();
+      const pdcIds = new Set();
+      const purchaseBillIds = new Set();
+
+      if (Array.isArray(body.ids)) {
+        for (let i = 0; i < body.ids.length; i++) {
+          addScalarBulkDeleteTarget(body.ids[i], ledgerIds, pdcIds, invalid, 'ids', i);
+        }
+      }
+
+      const rowArrays = [
+        ['transactions', body.transactions],
+        ['data', body.data]
+      ];
+      for (const [sourceKey, arr] of rowArrays) {
+        if (!Array.isArray(arr)) continue;
+        for (let i = 0; i < arr.length; i++) {
+          addRowBulkDeleteTargets(
+            arr[i],
+            ledgerIds,
+            pdcIds,
+            purchaseBillIds,
+            invalid,
+            sourceKey,
+            i
+          );
+        }
+      }
+
+      const hasIds = Array.isArray(body.ids);
+      const hasTransactions = Array.isArray(body.transactions);
+      const hasData = Array.isArray(body.data);
+      if (!hasIds && !hasTransactions && !hasData) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Request body must include "data" and/or "transactions" (row arrays from GET) and/or "ids"'
+        });
+      }
+
+      if (invalid.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation failed for one or more rows/ids',
+          invalid
+        });
+      }
+
+      const totalUnique = ledgerIds.size + pdcIds.size + purchaseBillIds.size;
+      if (totalUnique === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No valid ledger, PDC, or purchase bill targets to delete'
+        });
+      }
+
+      if (totalUnique > MAX_BULK_TRANSACTIONS) {
+        return res.status(400).json({
+          success: false,
+          error: `At most ${MAX_BULK_TRANSACTIONS} distinct rows per request (ledger + PDC + bills combined)`
+        });
+      }
+
+      let deletedPurchaseBills = 0;
+      const missingPurchaseBillIds = [];
+      for (const bid of purchaseBillIds) {
+        const ok = await PurchaseBill.delete(bid);
+        if (ok) deletedPurchaseBills += 1;
+        else missingPurchaseBillIds.push(bid);
+      }
+
+      let deletedPdc = 0;
+      const missingPdcIds = [];
+      for (const pid of pdcIds) {
+        const ok = await PDC.delete(pid);
+        if (ok) deletedPdc += 1;
+        else missingPdcIds.push(pid);
+      }
+
+      const { deleted: deletedLedger, missingIds: missingLedgerIds } =
+        ledgerIds.size > 0
+          ? await Transaction.deleteManyByIds([...ledgerIds])
+          : { deleted: 0, missingIds: [] };
+
+      const deleted = deletedLedger + deletedPdc + deletedPurchaseBills;
+
+      // missingIds: same as older API (ledger rows not found)
+      res.json({
+        success: true,
+        message: `${deleted} row(s) deleted (${deletedLedger} ledger, ${deletedPdc} PDC, ${deletedPurchaseBills} purchase bill)`,
+        deleted,
+        deletedLedger,
+        deletedPdc,
+        deletedPurchaseBills,
+        missingLedgerIds,
+        missingPdcIds,
+        missingPurchaseBillIds,
+        missingIds: missingLedgerIds
+      });
+    } catch (error) {
+      console.error('Error bulk deleting transactions:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to bulk delete transactions'
+      });
+    }
+  }
+);
+
 // Get a single transaction by ID
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
@@ -650,7 +886,7 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     // Validate payment type
-    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online', 'dd'];
     if (!validPaymentTypes.includes(paymentType.toLowerCase())) {
       return res.status(400).json({
         success: false,
@@ -739,7 +975,7 @@ router.put(
     }
 
     // Validate payment type
-    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+    const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online', 'dd'];
     if (!validPaymentTypes.includes(paymentType.toLowerCase())) {
       return res.status(400).json({
         success: false,

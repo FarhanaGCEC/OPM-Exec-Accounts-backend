@@ -666,6 +666,42 @@ class Transaction {
       throw error;
     }
   }
+
+  /**
+   * Delete multiple ledger rows by numeric id (AED `transactions` table only).
+   * Deletes newest-first (date DESC, id DESC) so running balances stay correct.
+   * @param {number[]} ids
+   * @returns {{ deleted: number, missingIds: number[] }}
+   */
+  static async deleteManyByIds(ids) {
+    const unique = [
+      ...new Set(
+        (ids || [])
+          .map((id) => parseInt(id, 10))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      )
+    ];
+    if (unique.length === 0) {
+      return { deleted: 0, missingIds: [] };
+    }
+
+    const placeholders = unique.map(() => '?').join(',');
+    const r = await pool.query(
+      `SELECT id FROM transactions WHERE id IN (${placeholders}) ORDER BY date DESC, id DESC`,
+      unique
+    );
+
+    const foundSet = new Set(r.rows.map((row) => row.id));
+    const missingIds = unique.filter((id) => !foundSet.has(id));
+
+    let deleted = 0;
+    for (const row of r.rows) {
+      const ok = await this.delete(row.id);
+      if (ok) deleted += 1;
+    }
+
+    return { deleted, missingIds };
+  }
 }
 
 module.exports = Transaction;

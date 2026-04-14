@@ -50,7 +50,7 @@ function assertTransactionEditRequired(normalized) {
   if (normalized.type !== 'Debit' && normalized.type !== 'Credit') {
     throw new Error('type must be Debit or Credit');
   }
-  const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online'];
+  const validPaymentTypes = ['cash', 'cheque', 'creditcard', 'online', 'dd'];
   if (!validPaymentTypes.includes(String(normalized.paymentType).toLowerCase())) {
     throw new Error(`paymentType must be one of: ${validPaymentTypes.join(', ')}`);
   }
