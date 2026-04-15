@@ -37,13 +37,48 @@ class Transaction {
    * @param {(sql: string, params?: any[]) => Promise<{ rows: any[] }>} queryFn
    */
   static async _recalculateAllBalancesQuery(queryFn) {
+    try {
+      await queryFn(`
+UPDATE transactions AS t
+INNER JOIN (
+  SELECT
+    id,
+    ROUND(
+      SUM(
+        CASE
+          WHEN type = 'Debit' THEN -CAST(amount AS DECIMAL(19,4))
+          WHEN type = 'Credit' THEN CAST(amount AS DECIMAL(19,4))
+          ELSE 0
+        END
+      ) OVER (
+        ORDER BY \`date\` ASC, id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ),
+      2
+    ) AS running_bal
+  FROM transactions
+) AS x ON t.id = x.id
+SET t.balance = x.running_bal
+      `);
+      const tail = await queryFn(
+        'SELECT balance FROM transactions ORDER BY `date` DESC, id DESC LIMIT 1'
+      );
+      if (tail.rows.length === 0) {
+        return 0;
+      }
+      return roundToTwoDecimals(parseFloat(tail.rows[0].balance));
+    } catch (e) {
+      console.warn(
+        'Transaction._recalculateAllBalancesQuery: window UPDATE failed, using row-by-row:',
+        e && e.message ? e.message : e
+      );
+    }
+
     const result = await queryFn(
       'SELECT id, type, amount FROM transactions ORDER BY date ASC, id ASC'
     );
 
     let runningBalance = 0;
-    const updates = [];
-
     for (const txn of result.rows) {
       if (txn.type === 'Debit') {
         runningBalance = runningBalance - parseFloat(txn.amount);
@@ -53,12 +88,12 @@ class Transaction {
 
       runningBalance = roundToTwoDecimals(runningBalance);
 
-      updates.push(
-        queryFn('UPDATE transactions SET balance = ? WHERE id = ?', [runningBalance, txn.id])
-      );
+      await queryFn('UPDATE transactions SET balance = ? WHERE id = ?', [
+        runningBalance,
+        txn.id
+      ]);
     }
 
-    await Promise.all(updates);
     return roundToTwoDecimals(runningBalance);
   }
 
@@ -319,9 +354,11 @@ class Transaction {
    * then recalculate all balances. Runs in one DB transaction.
    * @param {Array<{ date: string, type: string, categoryId: number|null, paymentType: string, chequeNumber: string|null, amount: number, remarks: string|null }>} normalizedRows
    * @param {number|null} createdBy
+   * @param {{ fetchRows?: boolean }} [options] fetchRows false skips N+1 getById calls after insert (faster large bulk)
    * @returns {Promise<Array<Record<string, unknown>>>} Created rows with category_name / created_by_username like create()
    */
-  static async createMany(normalizedRows, createdBy) {
+  static async createMany(normalizedRows, createdBy, options = {}) {
+    const fetchRows = options.fetchRows !== false;
     if (!normalizedRows.length) {
       return [];
     }
@@ -453,7 +490,16 @@ class Transaction {
       conn.release();
     }
 
-    const details = await Promise.all(insertedIds.map((id) => this.getById(id)));
+    if (!fetchRows) {
+      return insertedIds.map((id) => ({
+        id: typeof id === 'bigint' ? Number(id) : id,
+        _minimal: true
+      }));
+    }
+
+    const details = await Promise.all(
+      insertedIds.map((id) => this.getById(typeof id === 'bigint' ? Number(id) : id))
+    );
     return details.filter(Boolean);
   }
 
@@ -669,7 +715,8 @@ class Transaction {
 
   /**
    * Delete multiple ledger rows by numeric id (AED `transactions` table only).
-   * Deletes newest-first (date DESC, id DESC) so running balances stay correct.
+   * Uses one DELETE + one balance pass — calling delete() per row rescans/updates every
+   * subsequent transaction each time, which is O(n²) and can time out the client with no JSON.
    * @param {number[]} ids
    * @returns {{ deleted: number, missingIds: number[] }}
    */
@@ -691,16 +738,35 @@ class Transaction {
       unique
     );
 
-    const foundSet = new Set(r.rows.map((row) => row.id));
+    const toNum = (v) => (typeof v === 'bigint' ? Number(v) : v);
+    const foundSet = new Set(r.rows.map((row) => toNum(row.id)));
     const missingIds = unique.filter((id) => !foundSet.has(id));
 
-    let deleted = 0;
-    for (const row of r.rows) {
-      const ok = await this.delete(row.id);
-      if (ok) deleted += 1;
+    if (r.rows.length === 0) {
+      return { deleted: 0, missingIds };
     }
 
-    return { deleted, missingIds };
+    const idsToDelete = r.rows.map((row) => toNum(row.id));
+    const conn = await pool.connect();
+    await conn.beginTransaction();
+    try {
+      const delPh = idsToDelete.map(() => '?').join(',');
+      await conn.query(
+        `DELETE FROM transactions WHERE id IN (${delPh})`,
+        idsToDelete
+      );
+      await Transaction._recalculateAllBalancesQuery((sql, params = []) =>
+        conn.query(sql, params)
+      );
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    return { deleted: idsToDelete.length, missingIds };
   }
 }
 

@@ -7,7 +7,7 @@ const {
   queueTransactionDelete,
   queueTransactionPut,
 } = require('../controllers/transactionChangeRequestQueue');
-const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
+const { formatAmount, roundToTwoDecimals, parseLooseAmount } = require('../utils/formatAmount');
 const { pool } = require('../config/database');
 const {
   isGcecPdcType,
@@ -16,6 +16,11 @@ const {
 } = require('../utils/pdcLedgerApproval');
 const PDC = require('../models/PDC');
 const PurchaseBill = require('../models/PurchaseBill');
+const {
+  parseBankLedgerBulkCsvBuffer,
+  paymentFromDetails
+} = require('../utils/parseBankLedgerBulkCsv');
+const { uploadBankLedgerCsv } = require('../middleware/bankLedgerCsvUpload');
 
 const router = express.Router();
 
@@ -425,6 +430,17 @@ router.get('/', authenticateToken, async (req, res) => {
 
 const MAX_BULK_TRANSACTIONS = 500;
 
+/** Without ?full=1, bulk APIs skip N getById calls (faster response after import). */
+function bulkWantFullRowPayload(req) {
+  const q = req.query || {};
+  return (
+    q.full === '1' ||
+    q.full === 'true' ||
+    q.details === '1' ||
+    String(req.headers['x-bulk-full-response'] || '') === '1'
+  );
+}
+
 function addScalarBulkDeleteTarget(value, ledgerIds, pdcIds, invalid, source, index) {
   if (value == null || value === '') {
     invalid.push({ source, index, error: 'Empty value' });
@@ -544,9 +560,109 @@ function normalizeTransactionDateInput(date) {
   return formattedDate;
 }
 
+async function ensurePayableCategoryIdForImport(name) {
+  const n = String(name).trim();
+  if (!n) {
+    throw new Error('Description (payable name) is required for each row');
+  }
+  let r = await pool.query(
+    'SELECT id FROM payables_categories WHERE LOWER(TRIM(name)) = LOWER(?) LIMIT 1',
+    [n]
+  );
+  if (r.rows.length > 0) {
+    return r.rows[0].id;
+  }
+  await pool.query('INSERT INTO payables_categories (name) VALUES (?)', [n]);
+  r = await pool.query(
+    'SELECT id FROM payables_categories WHERE LOWER(TRIM(name)) = LOWER(?) LIMIT 1',
+    [n]
+  );
+  return r.rows[0].id;
+}
+
+async function ensureReceivableCategoryIdForImport(name) {
+  const n = String(name).trim();
+  if (!n) {
+    throw new Error('Description (receivable name) is required for each row');
+  }
+  let r = await pool.query(
+    'SELECT id FROM receivables_categories WHERE LOWER(TRIM(name)) = LOWER(?) LIMIT 1',
+    [n]
+  );
+  if (r.rows.length > 0) {
+    return r.rows[0].id;
+  }
+  await pool.query('INSERT INTO receivables_categories (name) VALUES (?)', [n]);
+  r = await pool.query(
+    'SELECT id FROM receivables_categories WHERE LOWER(TRIM(name)) = LOWER(?) LIMIT 1',
+    [n]
+  );
+  return r.rows[0].id;
+}
+
+/** mysql2 may return BIGINT as bigint — JSON.stringify throws on BigInt */
+function jsonSafeInt(v) {
+  if (v == null || v === '') return v;
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : v;
+}
+
+function jsonSerializeReplacer(_key, val) {
+  if (typeof val === 'bigint') return Number(val);
+  if (
+    val != null &&
+    typeof val === 'object' &&
+    typeof val.toISOString === 'function' &&
+    typeof val.getTime === 'function' &&
+    !Number.isNaN(val.getTime())
+  ) {
+    return val.toISOString();
+  }
+  return val;
+}
+
+/**
+ * Guaranteed JSON body for bulk endpoints (BigInt / Date-safe). Avoids res.json() throwing after DB commit.
+ */
+function sendJsonResponse(res, statusCode, payload) {
+  if (res.headersSent) {
+    console.warn('sendJsonResponse: headers already sent', statusCode);
+    return;
+  }
+  try {
+    const body = JSON.stringify(payload, jsonSerializeReplacer);
+    res.status(statusCode);
+    res.type('application/json');
+    res.send(body);
+  } catch (e) {
+    console.error('sendJsonResponse failed:', e);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to serialize API response (check server logs)'
+      });
+    }
+  }
+}
+
 function formatCreatedTransactionRow(transaction) {
+  const createdRaw = transaction.created_at;
+  let createdAt = createdRaw;
+  if (
+    createdRaw != null &&
+    typeof createdRaw === 'object' &&
+    typeof createdRaw.toISOString === 'function'
+  ) {
+    try {
+      createdAt = createdRaw.toISOString();
+    } catch (_) {
+      createdAt = createdRaw;
+    }
+  }
   return {
-    id: transaction.id,
+    id: jsonSafeInt(transaction.id),
     date: transaction.date,
     category: transaction.category_name || '-',
     paymentType: transaction.payment_type,
@@ -555,9 +671,10 @@ function formatCreatedTransactionRow(transaction) {
     credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
     balance: formatAmount(transaction.balance),
     remarks: transaction.remarks || null,
-    createdBy: transaction.created_by,
+    createdBy:
+      transaction.created_by != null ? jsonSafeInt(transaction.created_by) : null,
     createdByUsername: transaction.created_by_username,
-    createdAt: transaction.created_at
+    createdAt
   };
 }
 
@@ -603,16 +720,47 @@ router.post('/bulk', authenticateToken, async (req, res) => {
         date,
         type,
         categoryId,
-        paymentType,
-        chequeNumber,
+        category_id: category_id_snake,
+        paymentType: paymentTypeRaw,
+        payment_type: payment_type_snake,
+        chequeNumber: chequeNumberRaw,
+        cheque_number: cheque_number_snake,
         amount,
-        remarks
+        remarks,
+        details,
+        categoryName,
+        category,
+        description
       } = row || {};
 
-      if (!date || !type || !paymentType || amount == null) {
+      let paymentType = paymentTypeRaw ?? payment_type_snake;
+      let chequeNumber = chequeNumberRaw ?? cheque_number_snake;
+      const detailsVal = details;
+
+      if (
+        (!paymentType || String(paymentType).trim() === '') &&
+        detailsVal != null &&
+        String(detailsVal).trim() !== ''
+      ) {
+        const pay = paymentFromDetails(detailsVal);
+        if (pay.error) {
+          errors.push({ index: i, error: pay.error });
+          continue;
+        }
+        paymentType = pay.paymentType;
+        if (
+          (!chequeNumber || String(chequeNumber).trim() === '') &&
+          pay.chequeNumber
+        ) {
+          chequeNumber = pay.chequeNumber;
+        }
+      }
+
+      if (!date || !type || !paymentType || amount == null || amount === '') {
         errors.push({
           index: i,
-          error: 'Date, type, paymentType, and amount are required'
+          error:
+            'Date, type, amount, and paymentType (or details) are required'
         });
         continue;
       }
@@ -644,24 +792,46 @@ router.post('/bulk', authenticateToken, async (req, res) => {
         continue;
       }
 
-      const parsedAmount = parseFloat(amount);
+      const parsedAmount = parseLooseAmount(amount);
       if (isNaN(parsedAmount) || parsedAmount <= 0) {
         errors.push({
           index: i,
-          error: 'Amount must be greater than 0'
+          error:
+            'Amount must be greater than 0 (if pasted from Excel, remove thousands separators or use a plain number)'
         });
         continue;
       }
 
+      const categoryIdVal = categoryId ?? category_id_snake;
       let parsedCategoryId = null;
-      if (categoryId != null && categoryId !== '') {
-        parsedCategoryId = parseInt(categoryId, 10);
+      if (categoryIdVal != null && categoryIdVal !== '') {
+        parsedCategoryId = parseInt(categoryIdVal, 10);
         if (!Number.isFinite(parsedCategoryId)) {
           errors.push({
             index: i,
             error: 'categoryId must be a number when provided'
           });
           continue;
+        }
+      } else {
+        const nameCandidate = categoryName ?? category ?? description;
+        if (nameCandidate != null && String(nameCandidate).trim() !== '') {
+          try {
+            parsedCategoryId =
+              type === 'Debit'
+                ? await ensurePayableCategoryIdForImport(
+                    String(nameCandidate).trim()
+                  )
+                : await ensureReceivableCategoryIdForImport(
+                    String(nameCandidate).trim()
+                  );
+          } catch (e) {
+            errors.push({
+              index: i,
+              error: e.message || 'Failed to resolve category name'
+            });
+            continue;
+          }
         }
       }
 
@@ -686,14 +856,27 @@ router.post('/bulk', authenticateToken, async (req, res) => {
     }
 
     const createdBy = req.user ? req.user.id : null;
-    const created = await Transaction.createMany(normalized, createdBy);
-
-    res.status(201).json({
-      success: true,
-      message: `${created.length} transaction(s) created successfully`,
-      created: created.length,
-      data: created.map(formatCreatedTransactionRow)
+    const wantFull = bulkWantFullRowPayload(req);
+    const created = await Transaction.createMany(normalized, createdBy, {
+      fetchRows: wantFull
     });
+
+    if (!wantFull) {
+      sendJsonResponse(res, 200, {
+        success: true,
+        message: `${created.length} transaction(s) created successfully`,
+        created: created.length,
+        insertedIds: created.map((r) => jsonSafeInt(r.id)),
+        hint: 'Pass ?full=1 to include formatted row objects in "data".'
+      });
+    } else {
+      sendJsonResponse(res, 200, {
+        success: true,
+        message: `${created.length} transaction(s) created successfully`,
+        created: created.length,
+        data: created.map(formatCreatedTransactionRow)
+      });
+    }
   } catch (error) {
     console.error('Error bulk creating transactions:', error);
     res.status(500).json({
@@ -702,6 +885,111 @@ router.post('/bulk', authenticateToken, async (req, res) => {
     });
   }
 });
+
+/**
+ * Bulk import daily transactions from a bank-style CSV:
+ * Date, Description, Details, Debit, Credit, optional Remarks (Balance column ignored).
+ * Details: DD, Online, Cash, or digits-only cheque number.
+ */
+router.post(
+  '/bulk-csv',
+  authenticateToken,
+  (req, res, next) => {
+    uploadBankLedgerCsv.single('file')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          error: err.message || 'File upload failed'
+        });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing file field "file" (.csv)'
+        });
+      }
+
+      const { rows: parsedRows, errors: parseErrors } =
+        parseBankLedgerBulkCsvBuffer(req.file.buffer);
+
+      if (parseErrors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'CSV validation failed',
+          errors: parseErrors
+        });
+      }
+
+      if (parsedRows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No transactions to import'
+        });
+      }
+
+      if (parsedRows.length > MAX_BULK_TRANSACTIONS) {
+        return res.status(400).json({
+          success: false,
+          error: `At most ${MAX_BULK_TRANSACTIONS} transactions per file`
+        });
+      }
+
+      const normalized = [];
+      for (let i = 0; i < parsedRows.length; i++) {
+        const pr = parsedRows[i];
+        const categoryId =
+          pr.type === 'Debit'
+            ? await ensurePayableCategoryIdForImport(pr.description)
+            : await ensureReceivableCategoryIdForImport(pr.description);
+
+        normalized.push({
+          date: pr.date,
+          type: pr.type,
+          categoryId,
+          paymentType: pr.paymentType,
+          chequeNumber:
+            pr.paymentType === 'cheque' ? pr.chequeNumber : null,
+          amount: roundToTwoDecimals(pr.amount),
+          remarks: pr.remarks
+        });
+      }
+
+      const createdBy = req.user ? req.user.id : null;
+      const wantFull = bulkWantFullRowPayload(req);
+      const created = await Transaction.createMany(normalized, createdBy, {
+        fetchRows: wantFull
+      });
+
+      if (!wantFull) {
+        sendJsonResponse(res, 200, {
+          success: true,
+          message: `${created.length} transaction(s) imported from CSV`,
+          created: created.length,
+          insertedIds: created.map((r) => jsonSafeInt(r.id)),
+          hint: 'Pass ?full=1 to include formatted row objects in "data".'
+        });
+      } else {
+        sendJsonResponse(res, 200, {
+          success: true,
+          message: `${created.length} transaction(s) imported from CSV`,
+          created: created.length,
+          data: created.map(formatCreatedTransactionRow)
+        });
+      }
+    } catch (error) {
+      console.error('Transactions bulk CSV error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to import transactions from CSV'
+      });
+    }
+  }
+);
 
 /**
  * Bulk delete what the daily transactions UI shows: AED `transactions` rows (numeric id)
@@ -802,11 +1090,12 @@ router.post(
           : { deleted: 0, missingIds: [] };
 
       const deleted = deletedLedger + deletedPdc + deletedPurchaseBills;
+      const hasMissing =
+        missingLedgerIds.length > 0 ||
+        missingPdcIds.length > 0 ||
+        missingPurchaseBillIds.length > 0;
 
-      // missingIds: same as older API (ledger rows not found)
-      res.json({
-        success: true,
-        message: `${deleted} row(s) deleted (${deletedLedger} ledger, ${deletedPdc} PDC, ${deletedPurchaseBills} purchase bill)`,
+      const payload = {
         deleted,
         deletedLedger,
         deletedPdc,
@@ -815,6 +1104,41 @@ router.post(
         missingPdcIds,
         missingPurchaseBillIds,
         missingIds: missingLedgerIds
+      };
+
+      if (deleted === 0) {
+        console.warn(
+          'bulk-delete: no rows removed',
+          JSON.stringify({
+            requestedLedger: [...ledgerIds],
+            requestedPdc: [...pdcIds],
+            requestedPurchaseBills: [...purchaseBillIds],
+            missingLedgerIds,
+            missingPdcIds,
+            missingPurchaseBillIds
+          })
+        );
+        // 200 so axios/fetch error handlers do not swallow the JSON body
+        return sendJsonResponse(res, 200, {
+          success: false,
+          error:
+            'No rows were deleted. Ids may be wrong, rows may already be removed, or matured PDC lines need pdc-due-* id / pdcId from GET /api/transactions.',
+          ...payload
+        });
+      }
+
+      const partial = hasMissing && deleted > 0;
+      sendJsonResponse(res, 200, {
+        success: true,
+        ...(partial
+          ? {
+              partial: true,
+              warning:
+                'Some selected rows were not deleted (not found or already removed). Check missingLedgerIds, missingPdcIds, missingPurchaseBillIds.'
+            }
+          : {}),
+        message: `${deleted} row(s) deleted (${deletedLedger} ledger, ${deletedPdc} PDC, ${deletedPurchaseBills} purchase bill)`,
+        ...payload
       });
     } catch (error) {
       console.error('Error bulk deleting transactions:', error);
