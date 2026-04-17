@@ -2,9 +2,61 @@ const express = require('express');
 const EmiratesTransaction = require('../models/EmiratesTransaction');
 const { authenticateToken } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
-const { formatAmount } = require('../utils/formatAmount');
+const { formatAmount, roundToTwoDecimals, parseLooseAmount } = require('../utils/formatAmount');
+const { parseBankLedgerBulkCsvBuffer } = require('../utils/parseBankLedgerBulkCsv');
+const { uploadBankLedgerCsv } = require('../middleware/bankLedgerCsvUpload');
+const { pool } = require('../config/database');
 
 const router = express.Router();
+
+const MAX_BULK_EMIRATES = 500;
+
+function bulkWantFullRowPayload(req) {
+  const q = req.query || {};
+  return (
+    q.full === '1' ||
+    q.full === 'true' ||
+    q.details === '1' ||
+    String(req.headers['x-bulk-full-response'] || '') === '1'
+  );
+}
+
+function formatEmiratesCreatedRow(transaction) {
+  if (!transaction) return null;
+  return {
+    id: transaction.id,
+    accountNumber: transaction.account_number || null,
+    date: transaction.date,
+    description: transaction.description,
+    details: transaction.details || null,
+    currency: transaction.currency || 'AED',
+    debit: formatAmount(transaction.debit || 0),
+    bankCharges: formatAmount(transaction.bank_charges || 0),
+    credit: formatAmount(transaction.credit || 0),
+    balance: formatAmount(transaction.balance),
+    createdBy: transaction.created_by,
+    createdByUsername: transaction.created_by_username || null,
+    createdAt: transaction.created_at
+  };
+}
+
+/** Normalize date to YYYY-MM-DD (same rules as POST /). */
+function normalizeEmiratesDateInput(date) {
+  if (date instanceof Date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  if (typeof date === 'string') {
+    if (date.includes('/')) {
+      const [day, month, year] = date.split('/');
+      return `${year}-${month}-${day}`;
+    }
+    return date;
+  }
+  return date;
+}
 
 // Get all Emirates transactions
 router.get('/', authenticateToken, async (req, res) => {
@@ -70,6 +122,420 @@ router.get('/balance', authenticateToken, async (req, res) => {
     });
   }
 });
+
+/**
+ * Bulk create FK Emirates NBD rows. Body: { transactions: [ same fields as POST / ] }
+ * Rows are applied in chronological order (by date, then array order for the same date).
+ */
+router.post('/bulk', authenticateToken, async (req, res) => {
+  try {
+    const raw =
+      req.body && Array.isArray(req.body.transactions)
+        ? req.body.transactions
+        : null;
+
+    if (!raw) {
+      return res.status(400).json({
+        success: false,
+        error: 'Request body must include a "transactions" array'
+      });
+    }
+
+    if (raw.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: '"transactions" must not be empty'
+      });
+    }
+
+    if (raw.length > MAX_BULK_EMIRATES) {
+      return res.status(400).json({
+        success: false,
+        error: `At most ${MAX_BULK_EMIRATES} transactions per request`
+      });
+    }
+
+    const validCurrencies = ['AED', 'USD', 'GBP'];
+    const errors = [];
+    const normalized = [];
+
+    for (let i = 0; i < raw.length; i++) {
+      const row = raw[i] || {};
+      const {
+        account_number,
+        accountNumber: accountNumberCamel,
+        date,
+        description,
+        details,
+        currency: currencyRaw,
+        debit,
+        bank_charges,
+        bankCharges: bankChargesCamel,
+        credit
+      } = row;
+
+      if (!date || !description) {
+        errors.push({ index: i, error: 'Date and description are required' });
+        continue;
+      }
+
+      const transactionCurrency = String(currencyRaw || 'AED').toUpperCase();
+      if (!validCurrencies.includes(transactionCurrency)) {
+        errors.push({
+          index: i,
+          error: `Currency must be one of: ${validCurrencies.join(', ')}`
+        });
+        continue;
+      }
+
+      const parsedDebit = parseLooseAmount(debit ?? 0);
+      const parsedBankCharges = parseLooseAmount(
+        bank_charges ?? bankChargesCamel ?? 0
+      );
+      const parsedCredit = parseLooseAmount(credit ?? 0);
+
+      if (!Number.isFinite(parsedDebit) || parsedDebit < 0) {
+        errors.push({
+          index: i,
+          error: 'Debit must be a valid number >= 0'
+        });
+        continue;
+      }
+      if (!Number.isFinite(parsedBankCharges) || parsedBankCharges < 0) {
+        errors.push({
+          index: i,
+          error: 'Bank charges must be a valid number >= 0'
+        });
+        continue;
+      }
+      if (!Number.isFinite(parsedCredit) || parsedCredit < 0) {
+        errors.push({
+          index: i,
+          error: 'Credit must be a valid number >= 0'
+        });
+        continue;
+      }
+
+      const hasDebit = parsedDebit > 0;
+      const hasBankCharges = parsedBankCharges > 0;
+      const hasCredit = parsedCredit > 0;
+      if (!hasDebit && !hasBankCharges && !hasCredit) {
+        errors.push({
+          index: i,
+          error:
+            'At least one of debit, bank_charges, or credit must be greater than 0'
+        });
+        continue;
+      }
+
+      const acct = account_number ?? accountNumberCamel;
+      normalized.push({
+        _batchIndex: i,
+        accountNumber: acct != null && String(acct).trim() !== '' ? String(acct).trim() : null,
+        date: normalizeEmiratesDateInput(date),
+        description: String(description).trim(),
+        details: details != null && String(details).trim() !== '' ? String(details).trim() : null,
+        currency: transactionCurrency,
+        debit: roundToTwoDecimals(parsedDebit),
+        bankCharges: roundToTwoDecimals(parsedBankCharges),
+        credit: roundToTwoDecimals(parsedCredit)
+      });
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed for one or more rows',
+        errors
+      });
+    }
+
+    normalized.sort((a, b) => {
+      if (a.date < b.date) return -1;
+      if (a.date > b.date) return 1;
+      return a._batchIndex - b._batchIndex;
+    });
+
+    const createdBy = req.user ? req.user.id : null;
+    const wantFull = bulkWantFullRowPayload(req);
+    const insertedIds = [];
+    const data = [];
+
+    for (const n of normalized) {
+      const transaction = await EmiratesTransaction.create({
+        accountNumber: n.accountNumber,
+        date: n.date,
+        description: n.description,
+        details: n.details,
+        currency: n.currency,
+        debit: n.debit,
+        bankCharges: n.bankCharges,
+        credit: n.credit,
+        createdBy
+      });
+      insertedIds.push(transaction.id);
+      if (wantFull) {
+        data.push(formatEmiratesCreatedRow(transaction));
+      }
+    }
+
+    if (!wantFull) {
+      res.status(200).json({
+        success: true,
+        message: `${insertedIds.length} Emirates transaction(s) created`,
+        created: insertedIds.length,
+        insertedIds,
+        hint: 'Pass ?full=1 to include formatted row objects in "data".'
+      });
+    } else {
+      res.status(200).json({
+        success: true,
+        message: `${insertedIds.length} Emirates transaction(s) created`,
+        created: insertedIds.length,
+        insertedIds,
+        data
+      });
+    }
+  } catch (error) {
+    console.error('Error bulk creating Emirates transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to bulk create Emirates transactions'
+    });
+  }
+});
+
+/**
+ * Bulk import from bank-style CSV (Date, Description, Details, Debit, Credit).
+ * Optional query: account_number, currency (default AED). Multipart field name: file
+ */
+router.post(
+  '/bulk-csv',
+  authenticateToken,
+  (req, res, next) => {
+    uploadBankLedgerCsv.single('file')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          error: err.message || 'File upload failed'
+        });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing file field "file" (.csv)'
+        });
+      }
+
+      const { rows: parsedRows, errors: parseErrors } =
+        parseBankLedgerBulkCsvBuffer(req.file.buffer);
+
+      if (parseErrors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'CSV validation failed',
+          errors: parseErrors
+        });
+      }
+
+      if (parsedRows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No transactions to import'
+        });
+      }
+
+      if (parsedRows.length > MAX_BULK_EMIRATES) {
+        return res.status(400).json({
+          success: false,
+          error: `At most ${MAX_BULK_EMIRATES} transactions per file`
+        });
+      }
+
+      const validCurrencies = ['AED', 'USD', 'GBP'];
+      const qCurrency = (req.query.currency || 'AED').toUpperCase();
+      if (!validCurrencies.includes(qCurrency)) {
+        return res.status(400).json({
+          success: false,
+          error: `currency query must be one of: ${validCurrencies.join(', ')}`
+        });
+      }
+
+      const accountNumber =
+        req.query.account_number != null && String(req.query.account_number).trim() !== ''
+          ? String(req.query.account_number).trim()
+          : null;
+
+      const sorted = [...parsedRows].sort((a, b) => {
+        if (a.date < b.date) return -1;
+        if (a.date > b.date) return 1;
+        return 0;
+      });
+
+      const createdBy = req.user ? req.user.id : null;
+      const wantFull = bulkWantFullRowPayload(req);
+      const insertedIds = [];
+      const data = [];
+
+      for (const pr of sorted) {
+        const debit = pr.type === 'Debit' ? roundToTwoDecimals(pr.amount) : 0;
+        const credit = pr.type === 'Credit' ? roundToTwoDecimals(pr.amount) : 0;
+        const transaction = await EmiratesTransaction.create({
+          accountNumber,
+          date: pr.date,
+          description: pr.description,
+          details: pr.details || null,
+          currency: qCurrency,
+          debit,
+          bankCharges: 0,
+          credit,
+          createdBy
+        });
+        insertedIds.push(transaction.id);
+        if (wantFull) {
+          data.push(formatEmiratesCreatedRow(transaction));
+        }
+      }
+
+      if (!wantFull) {
+        res.status(200).json({
+          success: true,
+          message: `${insertedIds.length} Emirates transaction(s) imported from CSV`,
+          created: insertedIds.length,
+          insertedIds,
+          hint: 'Pass ?full=1 to include formatted row objects in "data".'
+        });
+      } else {
+        res.status(200).json({
+          success: true,
+          message: `${insertedIds.length} Emirates transaction(s) imported from CSV`,
+          created: insertedIds.length,
+          insertedIds,
+          data
+        });
+      }
+    } catch (error) {
+      console.error('Emirates bulk CSV error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to import Emirates transactions from CSV'
+      });
+    }
+  }
+);
+
+/**
+ * Bulk delete by numeric ids (admin / accountant). Deletes in reverse chronological order
+ * so running balances stay consistent.
+ */
+router.post(
+  '/bulk-delete',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
+    try {
+      const idsRaw = req.body && Array.isArray(req.body.ids) ? req.body.ids : null;
+
+      if (!idsRaw) {
+        return res.status(400).json({
+          success: false,
+          error: 'Request body must include an "ids" array of Emirates transaction ids'
+        });
+      }
+
+      if (idsRaw.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: '"ids" must not be empty'
+        });
+      }
+
+      const unique = [...new Set(idsRaw.map((x) => parseInt(x, 10)))].filter(
+        (n) => Number.isInteger(n) && n > 0
+      );
+
+      const invalid = [];
+      for (let i = 0; i < idsRaw.length; i++) {
+        const n = parseInt(idsRaw[i], 10);
+        if (!Number.isInteger(n) || n <= 0) {
+          invalid.push({ index: i, value: idsRaw[i], error: 'Must be a positive integer' });
+        }
+      }
+
+      if (invalid.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation failed for one or more ids',
+          invalid
+        });
+      }
+
+      if (unique.length > MAX_BULK_EMIRATES) {
+        return res.status(400).json({
+          success: false,
+          error: `At most ${MAX_BULK_EMIRATES} distinct ids per request`
+        });
+      }
+
+      if (unique.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No valid ids to delete'
+        });
+      }
+
+      const placeholders = unique.map(() => '?').join(',');
+      const orderResult = await pool.query(
+        `SELECT id FROM emirates_transactions WHERE id IN (${placeholders}) ORDER BY date DESC, id DESC`,
+        unique
+      );
+
+      const foundSet = new Set(orderResult.rows.map((r) => r.id));
+      const missingIds = unique.filter((id) => !foundSet.has(id));
+
+      let deleted = 0;
+      for (const row of orderResult.rows) {
+        const ok = await EmiratesTransaction.delete(row.id);
+        if (ok) deleted += 1;
+      }
+
+      if (deleted === 0) {
+        return res.status(200).json({
+          success: false,
+          error:
+            'No rows were deleted. Ids may be wrong or rows may already be removed.',
+          deleted: 0,
+          missingIds: missingIds.length > 0 ? missingIds : unique
+        });
+      }
+
+      const partial = missingIds.length > 0;
+      res.status(200).json({
+        success: true,
+        ...(partial
+          ? {
+              partial: true,
+              warning: 'Some ids were not found (already deleted or invalid).'
+            }
+          : {}),
+        message: `${deleted} Emirates transaction(s) deleted`,
+        deleted,
+        missingIds
+      });
+    } catch (error) {
+      console.error('Error bulk deleting Emirates transactions:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to bulk delete Emirates transactions'
+      });
+    }
+  }
+);
 
 // Get a single Emirates transaction by ID
 router.get('/:id', authenticateToken, async (req, res) => {

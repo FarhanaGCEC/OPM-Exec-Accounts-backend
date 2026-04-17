@@ -164,7 +164,7 @@ function buildColumnMap(headerRow) {
 
 /**
  * @param {Buffer} buffer
- * @returns {{ rows: Array<{ date: string, description: string, paymentType: string, chequeNumber: string | null, type: string, amount: number, remarks: string | null }>, errors: Array<{ line: number, error: string }> }}
+ * @returns {{ rows: Array<{ date: string, description: string, details: string, paymentType: string, chequeNumber: string | null, type: string, amount: number, remarks: string | null }>, errors: Array<{ line: number, error: string }> }}
  */
 function parseBankLedgerBulkCsvBuffer(buffer) {
   const text = buffer.toString('utf8');
@@ -258,6 +258,7 @@ function parseBankLedgerBulkCsvBuffer(buffer) {
     out.push({
       date: ymd,
       description: desc,
+      details: String(detailsRaw ?? '').trim(),
       paymentType: pay.paymentType,
       chequeNumber: pay.chequeNumber,
       type,
