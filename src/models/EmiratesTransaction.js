@@ -34,10 +34,15 @@ class EmiratesTransaction {
     }
   }
 
-  // Get all Emirates transactions
-  static async getAll() {
+  // Get all Emirates transactions (optionally filtered by currency)
+  static async getAll(currency = null) {
     try {
-      const result = await pool.query(`
+      const normalizedCurrency =
+        currency != null && String(currency).trim()
+          ? String(currency).trim().toUpperCase()
+          : null;
+
+      const baseQuery = `
         SELECT 
           t.id,
           t.account_number,
@@ -55,8 +60,13 @@ class EmiratesTransaction {
           t.updated_at
         FROM emirates_transactions t
         LEFT JOIN users u ON t.created_by = u.id
-        ORDER BY t.date ASC, t.id ASC
-      `);
+      `;
+      const result = normalizedCurrency
+        ? await pool.query(
+            `${baseQuery} WHERE t.currency = ? ORDER BY t.date ASC, t.id ASC`,
+            [normalizedCurrency]
+          )
+        : await pool.query(`${baseQuery} ORDER BY t.date ASC, t.id ASC`);
       return result.rows;
     } catch (error) {
       throw error;
