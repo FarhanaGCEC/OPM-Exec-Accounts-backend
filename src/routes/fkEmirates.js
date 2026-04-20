@@ -8,6 +8,25 @@ const { uploadBankLedgerCsv } = require('../middleware/bankLedgerCsvUpload');
 const { pool } = require('../config/database');
 
 const router = express.Router();
+const VALID_CURRENCIES = ['AED', 'USD', 'GBP'];
+
+function normalizeCurrencyOrNull(value) {
+  if (value == null) return null;
+  const normalized = String(value).trim().toUpperCase();
+  return normalized || null;
+}
+
+function validateCurrencyOrSend(res, currency) {
+  if (!currency) return { valid: true, currency: null };
+  if (!VALID_CURRENCIES.includes(currency)) {
+    res.status(400).json({
+      success: false,
+      error: `Currency must be one of: ${VALID_CURRENCIES.join(', ')}`
+    });
+    return { valid: false, currency: null };
+  }
+  return { valid: true, currency };
+}
 
 const MAX_BULK_EMIRATES = 500;
 
@@ -61,7 +80,10 @@ function normalizeEmiratesDateInput(date) {
 // Get all Emirates transactions
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const transactions = await EmiratesTransaction.getAll();
+    const requestedCurrency = normalizeCurrencyOrNull(req.query.currency);
+    const currencyValidation = validateCurrencyOrSend(res, requestedCurrency);
+    if (!currencyValidation.valid) return;
+    const transactions = await EmiratesTransaction.getAll(currencyValidation.currency);
 
     // Format response
     const formattedTransactions = transactions.map(txn => ({
@@ -81,17 +103,32 @@ router.get('/', authenticateToken, async (req, res) => {
       updatedAt: txn.updated_at
     }));
 
-    // Get current balance (latest transaction balance)
-    const currentBalance = transactions.length > 0 
-     ? formatAmount(transactions[transactions.length - 1].balance) 
-      : "0.00";
-
-    res.json({
+    const responsePayload = {
       success: true,
       data: formattedTransactions,
-      currentBalance: currentBalance,
       totalTransactions: transactions.length
-    });
+    };
+
+    // If currency is specified, return that currency's latest balance.
+    if (currencyValidation.currency) {
+      const latestBalance = await EmiratesTransaction.getLatestBalance(currencyValidation.currency);
+      responsePayload.currency = currencyValidation.currency;
+      responsePayload.currentBalance = formatAmount(latestBalance);
+    } else {
+      // No filter: expose balances per currency so tabs can stay isolated.
+      const balances = await Promise.all(
+        VALID_CURRENCIES.map(async (currency) => ({
+          currency,
+          balance: formatAmount(await EmiratesTransaction.getLatestBalance(currency))
+        }))
+      );
+      responsePayload.currentBalanceByCurrency = balances.reduce((acc, item) => {
+        acc[item.currency] = item.balance;
+        return acc;
+      }, {});
+    }
+
+    res.json(responsePayload);
   } catch (error) {
     console.error('Error fetching Emirates transactions:', error);
     res.status(500).json({
@@ -104,8 +141,10 @@ router.get('/', authenticateToken, async (req, res) => {
 // Get bank balance (current balance) for a specific currency
 router.get('/balance', authenticateToken, async (req, res) => {
   try {
-    const { currency } = req.query;
-    const transactionCurrency = currency || 'AED';
+    const requestedCurrency = normalizeCurrencyOrNull(req.query.currency) || 'AED';
+    const currencyValidation = validateCurrencyOrSend(res, requestedCurrency);
+    if (!currencyValidation.valid) return;
+    const transactionCurrency = currencyValidation.currency;
 
     const balance = await EmiratesTransaction.getLatestBalance(transactionCurrency);
 
@@ -600,15 +639,13 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
-    // Validate currency
-    const validCurrencies = ['AED', 'USD', 'GBP'];
-    const transactionCurrency = (currency || 'AED').toUpperCase();
-    if (!validCurrencies.includes(transactionCurrency)) {
-      return res.status(400).json({
-        success: false,
-        error: `Currency must be one of: ${validCurrencies.join(', ')}`
-      });
-    }
+    // Resolve/validate currency from body first, then query, then default AED
+    const transactionCurrency =
+      normalizeCurrencyOrNull(currency) ||
+      normalizeCurrencyOrNull(req.query.currency) ||
+      'AED';
+    const currencyValidation = validateCurrencyOrSend(res, transactionCurrency);
+    if (!currencyValidation.valid) return;
 
     // At least one of debit, bank_charges, or credit must be provided
     const hasDebit = debit !== undefined && debit !== null && parseFloat(debit) > 0;
@@ -676,7 +713,7 @@ router.post('/', authenticateToken, async (req, res) => {
       date: formattedDate,
       description: description,
       details: details || null,
-      currency: transactionCurrency,
+      currency: currencyValidation.currency,
       debit: parsedDebit,
       bankCharges: parsedBankCharges,
       credit: parsedCredit,
@@ -757,15 +794,13 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       });
     }
 
-    // Validate currency
-    const validCurrencies = ['AED', 'USD', 'GBP'];
-    const transactionCurrency = (finalCurrency || 'AED').toUpperCase();
-    if (!validCurrencies.includes(transactionCurrency)) {
-      return res.status(400).json({
-        success: false,
-        error: `Currency must be one of: ${validCurrencies.join(', ')}`
-      });
-    }
+    // Resolve/validate currency with request scope support.
+    const transactionCurrency =
+      normalizeCurrencyOrNull(finalCurrency) ||
+      normalizeCurrencyOrNull(req.query.currency) ||
+      'AED';
+    const currencyValidation = validateCurrencyOrSend(res, transactionCurrency);
+    if (!currencyValidation.valid) return;
 
     // At least one of debit, bank_charges, or credit must be provided
     const hasDebit = finalDebit !== undefined && finalDebit !== null && parseFloat(finalDebit) > 0;
@@ -830,7 +865,7 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       date: formattedDate,
       description: finalDescription,
       details: finalDetails || null,
-      currency: transactionCurrency,
+      currency: currencyValidation.currency,
       debit: parsedDebit,
       bankCharges: parsedBankCharges,
       credit: parsedCredit
@@ -886,6 +921,28 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, (req, res) =
 router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
+    const scopedCurrency =
+      normalizeCurrencyOrNull(req.query.currency) ||
+      normalizeCurrencyOrNull(req.body && req.body.currency);
+    const currencyValidation = validateCurrencyOrSend(res, scopedCurrency);
+    if (!currencyValidation.valid) return;
+
+    if (currencyValidation.currency) {
+      const existing = await EmiratesTransaction.getById(id);
+      if (!existing) {
+        return res.status(404).json({
+          success: false,
+          error: 'Emirates transaction not found'
+        });
+      }
+      if ((existing.currency || 'AED').toUpperCase() !== currencyValidation.currency) {
+        return res.status(400).json({
+          success: false,
+          error: `Transaction does not belong to ${currencyValidation.currency}`
+        });
+      }
+    }
+
     const deleted = await EmiratesTransaction.delete(id);
 
     if (!deleted) {
@@ -904,6 +961,85 @@ router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req,
     res.status(500).json({
       success: false,
       error: 'Failed to delete Emirates transaction'
+    });
+  }
+});
+
+// Bulk create Emirates transactions (keeps each currency independent)
+router.post('/bulk', authenticateToken, requireElevatedForMutation, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.transactions) ? req.body.transactions : [];
+    if (rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'transactions array is required'
+      });
+    }
+
+    const defaultCurrency = normalizeCurrencyOrNull(req.query.currency);
+    const defaultCurrencyValidation = validateCurrencyOrSend(res, defaultCurrency);
+    if (!defaultCurrencyValidation.valid) return;
+
+    const createdRows = [];
+    for (const row of rows) {
+      const rowCurrency =
+        normalizeCurrencyOrNull(row.currency) ||
+        defaultCurrencyValidation.currency ||
+        'AED';
+      const rowCurrencyValidation = validateCurrencyOrSend(res, rowCurrency);
+      if (!rowCurrencyValidation.valid) return;
+
+      const parsedDebit = parseFloat(row.debit || 0);
+      const parsedBankCharges = parseFloat(row.bank_charges || 0);
+      const parsedCredit = parseFloat(row.credit || 0);
+      if (
+        (isNaN(parsedDebit) || parsedDebit < 0) ||
+        (isNaN(parsedBankCharges) || parsedBankCharges < 0) ||
+        (isNaN(parsedCredit) || parsedCredit < 0)
+      ) {
+        return res.status(400).json({
+          success: false,
+          error: 'debit, bank_charges, and credit must be valid numbers >= 0'
+        });
+      }
+      if (parsedDebit <= 0 && parsedBankCharges <= 0 && parsedCredit <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each transaction must have at least one positive amount (debit, bank_charges, or credit)'
+        });
+      }
+      if (!row.date || !row.description) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each transaction requires date and description'
+        });
+      }
+
+      const created = await EmiratesTransaction.create({
+        accountNumber: row.account_number || null,
+        date: row.date,
+        description: row.description,
+        details: row.details || null,
+        currency: rowCurrencyValidation.currency,
+        debit: parsedDebit,
+        bankCharges: parsedBankCharges,
+        credit: parsedCredit,
+        createdBy: req.user ? req.user.id : null
+      });
+      createdRows.push(created);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Bulk Emirates transactions created successfully',
+      createdCount: createdRows.length,
+      data: createdRows
+    });
+  } catch (error) {
+    console.error('Error bulk creating Emirates transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to bulk create Emirates transactions'
     });
   }
 });
