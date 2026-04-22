@@ -101,7 +101,7 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate, lookahead
 }
 
 function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
-  const isCredit = isCustomerPdcType(pdc.pdc_type);
+  const isCustomerPdc = isCustomerPdcType(pdc.pdc_type);
   const isGcec = isGcecPdcType(pdc.pdc_type);
   const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
   const todayYmd = toYmd(new Date());
@@ -110,20 +110,30 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     pdc.description && String(pdc.description).trim()
       ? `${pdc.pdc_type}, ${String(pdc.description).trim()}`
       : pdc.pdc_type;
-  const ledgerApprovalRequired = isGcec || isCredit;
+  const ledgerApprovalRequired = isGcec || isCustomerPdc;
   const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   const ledgerApproved = ledgerApprovalRequired
     ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
     : true;
-  const includeInBalance = shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
+  // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
+  // Customer PDC: show as debit until approved, then switch to credit.
+  const isCredit = (isGcec && rowDate > todayYmd) || (isCustomerPdc && ledgerApproved);
+  // Future transition rows are display-only and must not affect running balance yet.
+  const includeInBalance = isUpcomingDailyTransitionPdc
+    ? false
+    : isCustomerPdc
+      ? true
+      : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
+  const debitValue = includeInBalance && !isCredit ? formatAmount(pdc.amount) : null;
+  const creditValue = includeInBalance && isCredit ? formatAmount(pdc.amount) : null;
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
     category: pdc.customer_name || '-',
     paymentType: 'cheque',
     chequeNumber: pdc.cheque_number || '-',
-    debit: isCredit ? null : formatAmount(pdc.amount),
-    credit: isCredit ? formatAmount(pdc.amount) : null,
+    debit: debitValue,
+    credit: creditValue,
     balance: null,
     remarks,
     balanceCellBgColor: getBalanceCellBgColorByRemarks(remarks),
