@@ -118,7 +118,7 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
   // Customer PDC: show as debit until approved, then switch to credit.
   const isCredit = (isGcec && rowDate > todayYmd) || (isCustomerPdc && ledgerApproved);
-  // Future transition rows are display-only and must not affect running balance yet.
+  // Future-date transition row should not affect running balance directly.
   const includeInBalance = isUpcomingDailyTransitionPdc
     ? false
     : isCustomerPdc
@@ -126,6 +126,8 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
       : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
   const debitValue = includeInBalance && !isCredit ? formatAmount(pdc.amount) : null;
   const creditValue = includeInBalance && isCredit ? formatAmount(pdc.amount) : null;
+  const pendingNoDateCredit =
+    isUpcomingDailyTransitionPdc && isCredit ? formatAmount(pdc.amount) : null;
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
@@ -148,6 +150,9 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     ledgerApproved,
     affectsBalance: includeInBalance,
     showLedgerApprovalCheckbox: approvalRelevantNow && !ledgerApproved,
+    // Frontend should treat this separately from the dated future row:
+    // apply only on the no-date duplicate row.
+    pendingNoDateCredit,
     /** Explicit flag for UI — use this or showLedgerApprovalCheckbox (do not rely on remarks text alone) */
     pendingGcecLedgerApproval: approvalRelevantNow && !ledgerApproved,
     /** When true, UI may clone this row at table end (no date on clone); backend sends this row once only */
