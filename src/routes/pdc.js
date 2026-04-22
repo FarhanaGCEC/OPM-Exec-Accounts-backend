@@ -6,7 +6,7 @@ const { requireElevatedForMutation } = require('../middleware/requireElevatedFor
 const { USER_ROLES } = require('../constants/roles');
 const { queuePdcDelete, queuePdcUpdate } = require('../controllers/pdcChangeRequestQueue');
 
-const { isGcecPdcType, parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
+const { isGcecPdcType, isCustomerPdcType, parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   uploadPdcChequeImage,
@@ -31,14 +31,14 @@ function formatPdcForApi(pdc) {
     daily_ledger_approved,
     ...rest
   } = pdc;
-  const gcec = isGcecPdcType(pdc.pdc_type);
-  const ledgerOk = gcec ? parseDailyLedgerApproved(daily_ledger_approved) : true;
+  const approvalType = isGcecPdcType(pdc.pdc_type) || isCustomerPdcType(pdc.pdc_type);
+  const ledgerOk = approvalType ? parseDailyLedgerApproved(daily_ledger_approved) : true;
   const out = {
     ...rest,
     amount: formatAmount(pdc.amount),
     attachment,
     dailyLedgerApproved: ledgerOk,
-    pendingGcecLedgerApproval: gcec && !ledgerOk
+    pendingGcecLedgerApproval: approvalType && !ledgerOk
   };
   if (out.days_remaining !== undefined) {
     out.days_remaining = parseInt(out.days_remaining, 10) || 0;
@@ -353,7 +353,7 @@ router.post(
 );
 
 /**
- * Approve matured GCEC PDC on the daily ledger (Customer & Custom PDC are auto-approved in the UI; only GCEC uses this).
+ * Approve matured GCEC/Customer PDC on the daily ledger.
  * Body: { "approved": true } or { "dailyLedgerApproved": true }
  */
 router.patch(
@@ -385,10 +385,10 @@ router.patch(
       if (!existing) {
         return res.status(404).json({ success: false, error: 'Post-dated cheque not found' });
       }
-      if (!isGcecPdcType(existing.pdc_type)) {
+      if (!isGcecPdcType(existing.pdc_type) && !isCustomerPdcType(existing.pdc_type)) {
         return res.status(400).json({
           success: false,
-          error: 'Daily ledger approval applies only to GCEC PDC (Customer PDC and Custom PDC are auto-approved)'
+          error: 'Daily ledger approval applies only to GCEC PDC and Customer PDC'
         });
       }
 

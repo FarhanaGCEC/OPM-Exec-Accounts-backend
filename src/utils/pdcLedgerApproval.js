@@ -16,6 +16,18 @@ function isCustomerPdcType(t) {
   return normalizePdcType(t).toUpperCase() === 'CUSTOMER PDC';
 }
 
+/**
+ * Balance-impact rule:
+ * - GCEC PDC: included immediately
+ * - Customer PDC: included only when daily ledger approved
+ * - Other types: included immediately
+ */
+function shouldPdcAffectBalance(pdcType, dailyLedgerApprovedRaw) {
+  if (isGcecPdcType(pdcType)) return true;
+  if (isCustomerPdcType(pdcType)) return parseDailyLedgerApproved(dailyLedgerApprovedRaw);
+  return true;
+}
+
 /** Interpret post_dated_cheques.daily_ledger_approved from MySQL/mysql2 (number, bool, Buffer, string, BigInt). */
 function parseDailyLedgerApproved(raw) {
   if (raw === true || raw === 1) return true;
@@ -34,5 +46,6 @@ module.exports = {
   normalizePdcType,
   isGcecPdcType,
   isCustomerPdcType,
-  parseDailyLedgerApproved
+  parseDailyLedgerApproved,
+  shouldPdcAffectBalance
 };

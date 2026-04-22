@@ -75,19 +75,6 @@ async function queueStatementFieldChange(req, res) {
     });
   }
 
-  const totalDue =
-    updateKeys.total_due !== undefined ? updateKeys.total_due : parseFloat(row.total_due || 0);
-  const paidAmt =
-    updateKeys.paid_amount !== undefined ? updateKeys.paid_amount : parseFloat(row.paid_amount || 0);
-  const eppBal =
-    updateKeys.epp_balance !== undefined ? updateKeys.epp_balance : parseFloat(row.epp_balance || 0);
-  if (paidAmt + eppBal > totalDue + 1e-9) {
-    return res.status(400).json({
-      success: false,
-      error: 'Paid amount + EPP cannot exceed Total Payment Due for the requested values.',
-    });
-  }
-
   const note =
     body.note != null
       ? String(body.note).trim()

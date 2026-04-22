@@ -2,6 +2,7 @@ const Statement = require('../models/Statement');
 const Card = require('../models/Card');
 const { pool } = require('../config/database');
 const { randomUUID } = require('crypto');
+const { calculateStatementBalances } = require('../utils/statementAmounts');
 
 class StatementService {
   /**
@@ -9,10 +10,7 @@ class StatementService {
    * pending_amount = total_due - (paid_amount + epp_balance)
    */
   static calculatePendingAmount(totalDue, paidAmount, eppBalance = 0) {
-    const total = parseFloat(totalDue) || 0;
-    const paid = parseFloat(paidAmount) || 0;
-    const epp = parseFloat(eppBalance) || 0;
-    return Math.max(0, Math.round((total - paid - epp) * 100) / 100);
+    return calculateStatementBalances(totalDue, paidAmount, eppBalance).amount_pending;
   }
 
   /**
@@ -264,12 +262,6 @@ class StatementService {
       throw new Error('Numeric fields must be >= 0');
     }
 
-    // Validate that paid + epp doesn't exceed total_due (optional business rule)
-    // You can remove this validation if you want to allow overpayment
-    if (paidAmount + eppBalance > totalDue) {
-      throw new Error('Paid amount + EPP cannot exceed Total Payment Due');
-    }
-
     if (updateData.balance_transfer !== undefined && parseFloat(updateData.balance_transfer) < 0) {
       throw new Error('balance_transfer must be >= 0');
     }
@@ -299,8 +291,10 @@ class StatementService {
       finalDueDate = existing.due_date;
     }
 
-    // Recalculate pending_amount: total_due - (paid_amount + epp_balance)
-    const pendingAmount = this.calculatePendingAmount(totalDue, paidAmount, eppBalance);
+    // Recalculate pending_amount from total_due, paid_amount and epp_balance
+    // Overpayment is allowed and reflected as credit_balance at response level.
+    const balances = calculateStatementBalances(totalDue, paidAmount, eppBalance);
+    const pendingAmount = balances.amount_pending;
 
     // Recalculate payment_status based on pending_amount and due_date
     const paymentStatus = this.calculatePaymentStatus(pendingAmount, finalDueDate);

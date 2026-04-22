@@ -133,6 +133,20 @@ class ReceivablesCategory {
       throw error;
     }
   }
+
+  // Count daily transactions linked to this receivable category
+  static async countLinkedTransactions(id) {
+    try {
+      const result = await pool.query(
+        "SELECT COUNT(*) AS cnt FROM transactions WHERE category_type = 'receivable' AND category_id = ?",
+        [id]
+      );
+      const raw = result.rows && result.rows[0] ? result.rows[0].cnt : 0;
+      return Number(raw) || 0;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = ReceivablesCategory;

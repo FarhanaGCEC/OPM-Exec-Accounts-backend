@@ -12,7 +12,8 @@ const { pool } = require('../config/database');
 const {
   isGcecPdcType,
   isCustomerPdcType,
-  parseDailyLedgerApproved
+  parseDailyLedgerApproved,
+  shouldPdcAffectBalance
 } = require('../utils/pdcLedgerApproval');
 const PDC = require('../models/PDC');
 const PurchaseBill = require('../models/PurchaseBill');
@@ -25,6 +26,7 @@ const { uploadBankLedgerCsv } = require('../middleware/bankLedgerCsvUpload');
 const router = express.Router();
 
 const PDC_DUE_ID_RE = /^pdc-due-(\d+)$/i;
+const AVAILABLE_BALANCE_BG_COLOR = '#91d34d';
 
 /** Normalize DB/JS dates to YYYY-MM-DD for sorting and comparison */
 function toYmd(d) {
@@ -39,16 +41,32 @@ function toYmd(d) {
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
 }
 
+function getBalanceCellBgColorByRemarks(remarks) {
+  const normalized = (remarks == null ? '' : String(remarks)).trim().toLowerCase();
+  if (!normalized) return null;
+  return normalized.includes('available balance') ? AVAILABLE_BALANCE_BG_COLOR : null;
+}
+
 /**
- * Post-dated cheques that have matured (cheque_date <= today) — shown as Daily Transaction rows.
+ * Daily transition PDC rows:
+ * - all matured PDC (cheque_date <= today) for GCEC/Customer/Custom
+ * - upcoming GCEC only (cheque_date <= today + lookaheadDays)
  * Optional startDate/endDate filter on cheque_date (for /all); omit for full history on GET /.
  */
-async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
+async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate, lookaheadDays = 0 } = {}) {
+  const safeLookahead = Number.isInteger(lookaheadDays) && lookaheadDays >= 0 ? lookaheadDays : 0;
   const conditions = [
-    'pdc.cheque_date <= CURDATE()',
-    "pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC')"
+    `(
+      (pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))
+      OR
+      (
+        pdc.pdc_type = 'GCEC PDC'
+        AND pdc.cheque_date > CURDATE()
+        AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+      )
+    )`
   ];
-  const params = [];
+  const params = [safeLookahead];
   if (startDate) {
     conditions.push('pdc.cheque_date >= ?');
     params.push(startDate);
@@ -84,15 +102,20 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
 
 function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const isCredit = isCustomerPdcType(pdc.pdc_type);
+  const isGcec = isGcecPdcType(pdc.pdc_type);
   const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
+  const todayYmd = toYmd(new Date());
+  const isUpcomingDailyTransitionPdc = rowDate > todayYmd;
   const remarks =
     pdc.description && String(pdc.description).trim()
       ? `${pdc.pdc_type}, ${String(pdc.description).trim()}`
       : pdc.pdc_type;
-  const ledgerApprovalRequired = isGcecPdcType(pdc.pdc_type);
+  const ledgerApprovalRequired = isGcec || isCredit;
+  const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   const ledgerApproved = ledgerApprovalRequired
     ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
     : true;
+  const includeInBalance = shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
@@ -103,19 +126,24 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     credit: isCredit ? formatAmount(pdc.amount) : null,
     balance: null,
     remarks,
+    balanceCellBgColor: getBalanceCellBgColorByRemarks(remarks),
     createdBy: pdc.created_by,
     createdByUsername: pdc.created_by_username || null,
     createdAt: pdc.created_at,
     pdcId: pdc.id,
     pdcType: pdc.pdc_type,
+    isUpcomingDailyTransitionPdc,
     syntheticFromPdc: true,
-    ledgerApprovalRequired,
+    ledgerApprovalRequired: approvalRelevantNow,
     ledgerApproved,
-    showLedgerApprovalCheckbox: ledgerApprovalRequired && !ledgerApproved,
+    affectsBalance: includeInBalance,
+    showLedgerApprovalCheckbox: approvalRelevantNow && !ledgerApproved,
     /** Explicit flag for UI — use this or showLedgerApprovalCheckbox (do not rely on remarks text alone) */
-    pendingGcecLedgerApproval: ledgerApprovalRequired && !ledgerApproved,
+    pendingGcecLedgerApproval: approvalRelevantNow && !ledgerApproved,
     /** When true, UI may clone this row at table end (no date on clone); backend sends this row once only */
-    ledgerApprovalFooterDuplicateForUi: ledgerApprovalRequired && !ledgerApproved
+    ledgerApprovalFooterDuplicateForUi:
+      isUpcomingDailyTransitionPdc || (approvalRelevantNow && !ledgerApproved),
+    showAtDailyTransitionEnd: isUpcomingDailyTransitionPdc
   };
   if (transactionType) {
     return { ...base, transactionType };
@@ -135,6 +163,17 @@ function sortMergedByDateThenId(rows) {
   });
 }
 
+function deriveDateRangeFromRows(rows) {
+  const ymd = [];
+  for (const row of rows || []) {
+    const d = toYmd(row && row.date);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) ymd.push(d);
+  }
+  if (ymd.length === 0) return { startDate: null, endDate: null };
+  ymd.sort();
+  return { startDate: ymd[0], endDate: ymd[ymd.length - 1] };
+}
+
 /**
  * Running balance for merged list (DB transactions + synthetic PDC). Same rules as Transaction.recalculateAllBalances.
  * Mutates each row's `balance`. Includes normal rows (bounced/returned cheques, etc.) when they exist as ledger transactions.
@@ -144,6 +183,10 @@ async function applyRunningBalancesToMainRows(mainRows) {
   const firstYmd = toYmd(mainRows[0].date);
   let running = await Transaction.getBalanceBeforeDate(firstYmd);
   for (const row of mainRows) {
+    if (row.affectsBalance === false) {
+      row.balance = formatAmount(running);
+      continue;
+    }
     let debitAmt = 0;
     let creditAmt = 0;
     if (row.debit != null && row.debit !== '') {
@@ -223,18 +266,24 @@ router.get('/all', authenticateToken, async (req, res) => {
       credit: txn.type === 'Credit' ? formatAmount(txn.amount) : null,
       balance: formatAmount(txn.balance),
       remarks: txn.remarks || null,
+      balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
     }));
 
     // PDCs whose cheque date has arrived: Daily Transaction rows dated as cheque_date (same range as filters when set)
-    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({ startDate, endDate });
+    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({
+      startDate,
+      endDate,
+      lookaheadDays: 30
+    });
     const pdcAsDaily = pdcRows.map((pdc) =>
       mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'Daily Transaction' })
     );
-    dailyTransactions = sortMergedByDateThenId([...dailyTransactions, ...pdcAsDaily]);
-    await applyRunningBalancesToMainRows(dailyTransactions);
+    const mainDailyRows = sortMergedByDateThenId([...dailyTransactions, ...pdcAsDaily]);
+    await applyRunningBalancesToMainRows(mainDailyRows);
+    dailyTransactions = mainDailyRows;
 
     // 2. Get GCEC PDC
     const gcecPdcDateFilter = buildDateFilter('pdc.cheque_date');
@@ -358,20 +407,39 @@ router.get('/all', authenticateToken, async (req, res) => {
       ...customerPdcs,
       ...purchaseBills
     ];
+    const orderedAllTransactions = [...allTransactions].sort((a, b) => {
+      const da = toYmd(a.date);
+      const db = toYmd(b.date);
+      if (da !== db) return da.localeCompare(db);
+      const aCreated = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bCreated = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (aCreated !== bCreated) return aCreated - bCreated;
+      return String(a.id).localeCompare(String(b.id));
+    });
 
+    const derivedRange = deriveDateRangeFromRows(orderedAllTransactions);
+    const dailyRowsWithBalance = orderedAllTransactions.filter(
+      (row) => row.transactionType === 'Daily Transaction' && row.balance != null
+    );
+    const currentBalance =
+      dailyRowsWithBalance.length > 0
+        ? dailyRowsWithBalance[dailyRowsWithBalance.length - 1].balance
+        : '0.00';
     res.json({
       success: true,
-      data: allTransactions,
+      data: orderedAllTransactions,
+      currentBalance,
+      totalTransactions: orderedAllTransactions.length,
       summary: {
         dailyTransactions: dailyTransactions.length,
         gcecPdc: gcecPdcs.length,
         customerPdc: customerPdcs.length,
         purchaseBills: purchaseBills.length,
-        total: allTransactions.length
+        total: orderedAllTransactions.length
       },
       filters: {
-        startDate: startDate || null,
-        endDate: endDate || null
+        startDate: startDate || derivedRange.startDate,
+        endDate: endDate || derivedRange.endDate
       }
     });
   } catch (error) {
@@ -400,18 +468,22 @@ router.get('/', authenticateToken, async (req, res) => {
       credit: txn.type === 'Credit' ? formatAmount(txn.amount) : null,
       balance: formatAmount(txn.balance),
       remarks: txn.remarks || null,
+      balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
     }));
 
-    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({});
+    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({ lookaheadDays: 30 });
     const synthetic = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
-    formattedTransactions = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
-    await applyRunningBalancesToMainRows(formattedTransactions);
+    const rowsForRunningBalance = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
+    await applyRunningBalancesToMainRows(rowsForRunningBalance);
+    formattedTransactions = rowsForRunningBalance;
 
     const currentBalance =
-      formattedTransactions.length > 0 ? formattedTransactions[formattedTransactions.length - 1].balance : '0.00';
+      rowsForRunningBalance.length > 0
+        ? rowsForRunningBalance[rowsForRunningBalance.length - 1].balance
+        : '0.00';
 
     res.json({
       success: true,
@@ -671,6 +743,7 @@ function formatCreatedTransactionRow(transaction) {
     credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
     balance: formatAmount(transaction.balance),
     remarks: transaction.remarks || null,
+    balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
     createdBy:
       transaction.created_by != null ? jsonSafeInt(transaction.created_by) : null,
     createdByUsername: transaction.created_by_username,
@@ -1176,6 +1249,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
         amount: formatAmount(transaction.amount),
         balance: formatAmount(transaction.balance),
         remarks: transaction.remarks || null,
+        balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -1362,6 +1436,7 @@ router.put(
         credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
         balance: formatAmount(transaction.balance),
         remarks: transaction.remarks || null,
+        balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at

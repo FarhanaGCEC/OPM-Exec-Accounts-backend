@@ -19,6 +19,7 @@ const {
   normalizeStatementAmount,
   parseStatementDateInput,
 } = require('../utils/statementPatchParse');
+const { calculateStatementBalances } = require('../utils/statementAmounts');
 
 /** Older attachments saved on disk before Cloudinary */
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
@@ -349,6 +350,7 @@ class StatementController {
         }
         
         // Format response to match table structure (matching image headers)
+        const balances = calculateStatementBalances(row.total_due, row.paid_amount, row.epp_balance);
         const formatted = {
           // Card details (always present - from cards table)
           issuing_bank: row.issuing_bank || null,
@@ -370,7 +372,8 @@ class StatementController {
           total_payment_due: row.total_due ? formatAmount(row.total_due) : "0.00", // Matches "Total Payment Due"
           paid: row.paid_amount ? formatAmount(row.paid_amount) : "0.00", // Matches "Paid"
           epp: row.epp_balance ? formatAmount(row.epp_balance) : "0.00", // Matches "EPP"
-          amount_pending: row.pending_amount ? formatAmount(row.pending_amount) : "0.00", // Matches "Amount Pending"
+          amount_pending: formatAmount(balances.amount_pending), // Never negative
+          credit_balance: formatAmount(balances.credit_balance), // Overpayment amount
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
           payment_status: row.payment_status || 'PARTIAL',
           created_at: row.created_at || null,
@@ -597,23 +600,6 @@ class StatementController {
         statementId = existingStatement.id;
       }
 
-      // Calculate final values for validation (use normalized provided values or existing)
-      // Note: existingStatement is guaranteed to exist at this point (either found or auto-created)
-      const validationTotalDue =
-        normTotalDue !== undefined ? normTotalDue : parseFloat(existingStatement.total_due || 0);
-      const validationPaidAmount =
-        normPaidAmount !== undefined ? normPaidAmount : parseFloat(existingStatement.paid_amount || 0);
-      const validationEppBalance =
-        normEppBalance !== undefined ? normEppBalance : parseFloat(existingStatement.epp_balance || 0);
-
-      // Validate that paid_amount + epp_balance doesn't exceed total_due
-      if (validationPaidAmount + validationEppBalance > validationTotalDue) {
-        return res.status(400).json({
-          success: false,
-          error: `Paid amount (${validationPaidAmount}) + EPP (${validationEppBalance}) cannot exceed Total Payment Due (${validationTotalDue})`
-        });
-      }
-
       const updateData = {};
       if (parsedStatementDate !== undefined) updateData.statement_date = parsedStatementDate;
       if (parsedDueDate !== undefined) updateData.due_date = parsedDueDate;
@@ -650,6 +636,11 @@ class StatementController {
         formattedDueMonth = monthIndex !== -1 ? monthNamesShort[monthIndex] : (statement.due_date ? getMonthAbbreviation(statement.due_date) : null);
       }
 
+      const balances = calculateStatementBalances(
+        statement.total_due,
+        statement.paid_amount,
+        statement.epp_balance
+      );
       const formattedStatement = {
         // Card details
         issuing_bank: statement.issuing_bank,
@@ -671,7 +662,8 @@ class StatementController {
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
-        amount_pending: formatAmount(statement.pending_amount),
+        amount_pending: formatAmount(balances.amount_pending),
+        credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
@@ -812,6 +804,11 @@ class StatementController {
         formattedDueMonth = monthIndex !== -1 ? monthNamesShort[monthIndex] : (statement.due_date ? getMonthAbbreviation(statement.due_date) : null);
       }
 
+      const balances = calculateStatementBalances(
+        statement.total_due,
+        statement.paid_amount,
+        statement.epp_balance
+      );
       const formattedStatement = {
         // Card details
         issuing_bank: statement.issuing_bank,
@@ -833,7 +830,8 @@ class StatementController {
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
-        amount_pending: formatAmount(statement.pending_amount),
+        amount_pending: formatAmount(balances.amount_pending),
+        credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
@@ -919,6 +917,11 @@ class StatementController {
         formattedDueMonth = monthIndex !== -1 ? monthNamesShort[monthIndex] : (statement.due_date ? getMonthAbbreviation(statement.due_date) : null);
       }
 
+      const balances = calculateStatementBalances(
+        statement.total_due,
+        statement.paid_amount,
+        statement.epp_balance
+      );
       const formattedStatement = {
         issuing_bank: statement.issuing_bank,
         card_holder: statement.card_holder,
@@ -935,7 +938,8 @@ class StatementController {
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
-        amount_pending: formatAmount(statement.pending_amount),
+        amount_pending: formatAmount(balances.amount_pending),
+        credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         payment_status: statement.payment_status,
         created_at: statement.created_at,

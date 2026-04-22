@@ -216,6 +216,15 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
 router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
+    const linkedCount = await PayablesCategory.countLinkedTransactions(id);
+    if (linkedCount > 0) {
+      return res.status(409).json({
+        success: false,
+        error:
+          'Cannot delete this creditor because it is used in Daily Transactions. Remove or reassign those transactions first.',
+        linkedDailyTransactions: linkedCount
+      });
+    }
     const deleted = await PayablesCategory.delete(id);
 
     if (!deleted) {
