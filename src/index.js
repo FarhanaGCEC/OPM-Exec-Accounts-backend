@@ -23,6 +23,7 @@ const purchaseBillsRoutes = require('./routes/purchaseBills');
 const usdTransactionsRoutes = require('./routes/usdTransactions');
 const gbpTransactionsRoutes = require('./routes/gbpTransactions');
 const fkEmiratesRoutes = require('./routes/fkEmirates');
+const dailyBankStatementRoutes = require('./routes/dailyBankStatement');
 const { authenticateToken } = require('./middleware/auth');
 const { authorizeRoles } = require('./middleware/authorizeRoles');
 const { USER_ROLES } = require('./constants/roles');
@@ -233,6 +234,9 @@ app.use('/api/analytics', analyticsRoutes);
 
 // Account Summary routes (protected)
 app.use('/api/account-summary', accountSummaryRoutes);
+
+// Daily bank statement PDF (standalone, protected)
+app.use('/api/daily-bank-statement', dailyBankStatementRoutes);
 
 // Body-parser uses http-errors: status 400, type 'entity.parse.failed' (not always SyntaxError).
 app.use((err, req, res, next) => {

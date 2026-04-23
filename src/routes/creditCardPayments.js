@@ -9,7 +9,28 @@ const router = express.Router();
 // Get all credit card payments
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const payments = await CreditCardPayment.getAll();
+    const { year, months, paidAgainst, paid_against } = req.query;
+    const normalizedPaidAgainst = paidAgainst ?? paid_against;
+
+    if (year !== undefined && (!Number.isInteger(Number(year)) || Number(year) < 1900 || Number(year) > 9999)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid year. Expected a valid 4-digit year.'
+      });
+    }
+
+    if (months !== undefined && (!Number.isInteger(Number(months)) || Number(months) < 1 || Number(months) > 12)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid months. Expected value between 1 and 12.'
+      });
+    }
+
+    const payments = await CreditCardPayment.getAll({
+      year: year !== undefined ? Number(year) : undefined,
+      months: months !== undefined ? Number(months) : undefined,
+      paidAgainst: normalizedPaidAgainst
+    });
     res.json({
       success: true,
       data: payments.map(payment => ({
@@ -19,6 +40,8 @@ router.get('/', authenticateToken, async (req, res) => {
         card_no: payment.card_number || null,
         amount: formatAmount(payment.amount),
         remarks: payment.remarks || null,
+        paid_against: payment.paid_against || null,
+        paidAgainst: payment.paid_against || null,
         credit_card_id: payment.credit_card_id || payment.card_id || null,
         issuing_bank: payment.issuing_bank || null,
         created_at: payment.created_at,
@@ -54,6 +77,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
       card_no: payment.card_number || null,
       amount: formatAmount(payment.amount),
       remarks: payment.remarks || null,
+      paid_against: payment.paid_against || null,
+      paidAgainst: payment.paid_against || null,
       credit_card_id: payment.credit_card_id || payment.card_id || null,
       issuing_bank: payment.issuing_bank || null,
       created_at: payment.created_at,
@@ -74,7 +99,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // Create a new credit card payment
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks } = req.body;
+    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
 
     // Validation
     if (!payment_date || !amount) {
@@ -143,6 +168,7 @@ router.post('/', authenticateToken, async (req, res) => {
       paymentMethod: 'Credit Card',
       amount: roundedAmount,
       remarks: remarks || null,
+      paidAgainst: paidAgainst ?? paid_against ?? null,
       createdBy: createdBy
     });
 
@@ -153,6 +179,8 @@ router.post('/', authenticateToken, async (req, res) => {
       card_no: payment.card_number || null,
       amount: formatAmount(payment.amount),
       remarks: payment.remarks || null,
+      paid_against: payment.paid_against || null,
+      paidAgainst: payment.paid_against || null,
       credit_card_id: payment.credit_card_id || payment.card_id || null,
       issuing_bank: payment.issuing_bank || null,
       created_at: payment.created_at,
@@ -177,7 +205,7 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks } = req.body;
+    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
 
     const updateData = {};
 
@@ -243,6 +271,9 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
     if (remarks !== undefined) {
       updateData.remarks = remarks || null;
     }
+    if (paidAgainst !== undefined || paid_against !== undefined) {
+      updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
+    }
 
     const payment = await CreditCardPayment.update(id, updateData);
 
@@ -260,6 +291,8 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
       card_no: payment.card_number || null,
       amount: formatAmount(payment.amount),
       remarks: payment.remarks || null,
+      paid_against: payment.paid_against || null,
+      paidAgainst: payment.paid_against || null,
       credit_card_id: payment.credit_card_id || payment.card_id || null,
       issuing_bank: payment.issuing_bank || null,
       created_at: payment.created_at,
@@ -284,7 +317,7 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
 router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { id } = req.params;
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks } = req.body;
+    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
 
     const updateData = {};
 
@@ -350,6 +383,9 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
     if (remarks !== undefined) {
       updateData.remarks = remarks || null;
     }
+    if (paidAgainst !== undefined || paid_against !== undefined) {
+      updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
+    }
 
     const payment = await CreditCardPayment.update(id, updateData);
 
@@ -367,6 +403,8 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
       card_no: payment.card_number || null,
       amount: formatAmount(payment.amount),
       remarks: payment.remarks || null,
+      paid_against: payment.paid_against || null,
+      paidAgainst: payment.paid_against || null,
       credit_card_id: payment.credit_card_id || payment.card_id || null,
       issuing_bank: payment.issuing_bank || null,
       created_at: payment.created_at,

@@ -465,6 +465,7 @@ const initDatabase = async () => {
         payment_method VARCHAR(50) NOT NULL DEFAULT 'Credit Card',
         amount DECIMAL(15, 2) NOT NULL,
         remarks TEXT,
+        paid_against VARCHAR(255),
         created_by INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -472,6 +473,13 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    if (await tableExists('credit_card_payments')) {
+      if (!(await columnExists('credit_card_payments', 'paid_against'))) {
+        await pool.query(
+          'ALTER TABLE credit_card_payments ADD COLUMN paid_against VARCHAR(255) NULL'
+        );
+      }
+    }
     await ensureIndex('credit_card_payments', 'idx_cc_payment_date', 'payment_date');
 
     // Create credit_cards (legacy)
@@ -641,6 +649,72 @@ const initDatabase = async () => {
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
+
+    // Create daily_bank_statements (singleton row: one active PDF only)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS daily_bank_statements (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        singleton_key TINYINT NOT NULL DEFAULT 1,
+        original_filename VARCHAR(512) NOT NULL,
+        stored_filename VARCHAR(512) NOT NULL,
+        file_path VARCHAR(1024) NOT NULL,
+        mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
+        file_size BIGINT NULL,
+        uploaded_by INT NULL,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key),
+        CONSTRAINT fk_daily_bank_statements_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `);
+
+    if (await tableExists('daily_bank_statements')) {
+      if (!(await columnExists('daily_bank_statements', 'singleton_key'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN singleton_key TINYINT NOT NULL DEFAULT 1'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'original_filename'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN original_filename VARCHAR(512) NOT NULL DEFAULT "daily-bank-statement.pdf"'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'stored_filename'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN stored_filename VARCHAR(512) NOT NULL DEFAULT "daily-bank-statement.pdf"'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'file_path'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN file_path VARCHAR(1024) NOT NULL DEFAULT ""'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'mime_type'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN mime_type VARCHAR(100) NOT NULL DEFAULT "application/pdf"'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'file_size'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN file_size BIGINT NULL'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'uploaded_by'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN uploaded_by INT NULL'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'uploaded_at'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+        );
+      }
+    }
+    if (!(await indexExists('daily_bank_statements', 'uk_daily_bank_statement_singleton'))) {
+      await pool.query(
+        'ALTER TABLE daily_bank_statements ADD UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key)'
+      );
+    }
 
     // Create emirates_transactions
     await pool.query(`

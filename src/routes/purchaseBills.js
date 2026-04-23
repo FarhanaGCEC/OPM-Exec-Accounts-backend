@@ -20,6 +20,8 @@ router.get('/', authenticateToken, async (req, res) => {
       data: bills.map(bill => {
         const formatted = { ...bill };
         formatted.amount = formatAmount(bill.amount);
+        // Backward-compatible alias for clients that send/read "remarks".
+        formatted.remarks = bill.description || null;
         return formatted;
       })
     });
@@ -47,6 +49,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     const formattedBill = { ...bill };
     formattedBill.amount = formatAmount(bill.amount);
+    formattedBill.remarks = bill.description || null;
     res.json({
       success: true,
       data: formattedBill
@@ -62,7 +65,17 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // Create a new purchase bill
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status } = req.body;
+    const {
+      bill_date,
+      invoice_number,
+      vendor_name,
+      bill_number,
+      payment_method,
+      amount,
+      description,
+      remarks,
+      payment_status
+    } = req.body;
 
     // Validation
     if (!bill_date || !amount) {
@@ -141,13 +154,14 @@ router.post('/', authenticateToken, async (req, res) => {
       billNumber: bill_number || null,
       paymentMethod: payment_method || 'Credit Card',
       amount: roundedAmount,
-      description: description || null,
+      description: (description ?? remarks) || null,
       paymentStatus: status,
       createdBy: createdBy
     });
 
     const formattedBill = { ...bill };
     formattedBill.amount = formatAmount(bill.amount);
+    formattedBill.remarks = bill.description || null;
     res.status(201).json({
       success: true,
       message: 'Purchase bill created successfully',
@@ -169,7 +183,17 @@ router.put('/:id', authenticateToken, async (req, res) => {
   }
   try {
     const { id } = req.params;
-    const { bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status } = req.body;
+    const {
+      bill_date,
+      invoice_number,
+      vendor_name,
+      bill_number,
+      payment_method,
+      amount,
+      description,
+      remarks,
+      payment_status
+    } = req.body;
 
     // Validation
     if (!bill_date || !amount) {
@@ -243,7 +267,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
       billNumber: bill_number || null,
       paymentMethod: payment_method || 'Credit Card',
       amount: roundedAmount,
-      description: description || null,
+      description: (description ?? remarks) || null,
       paymentStatus: status
     });
 
@@ -256,6 +280,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
     const formattedBill = { ...bill };
     formattedBill.amount = formatAmount(bill.amount);
+    formattedBill.remarks = bill.description || null;
     res.json({
       success: true,
       message: 'Purchase bill updated successfully',
@@ -277,7 +302,17 @@ router.patch('/:id', authenticateToken, async (req, res) => {
   }
   try {
     const { id } = req.params;
-    const { bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status } = req.body;
+    const {
+      bill_date,
+      invoice_number,
+      vendor_name,
+      bill_number,
+      payment_method,
+      amount,
+      description,
+      remarks,
+      payment_status
+    } = req.body;
 
     const updateData = {};
 
@@ -348,6 +383,8 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     }
     if (description !== undefined) {
       updateData.description = description || null;
+    } else if (remarks !== undefined) {
+      updateData.description = remarks || null;
     }
     if (payment_status !== undefined) {
       const validStatuses = ['Pending', 'Paid', 'Partially Paid'];
@@ -371,6 +408,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
 
     const formattedBill = { ...bill };
     formattedBill.amount = formatAmount(bill.amount);
+    formattedBill.remarks = bill.description || null;
     res.json({
       success: true,
       message: 'Purchase bill updated successfully',

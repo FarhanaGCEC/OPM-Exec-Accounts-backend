@@ -260,10 +260,9 @@ router.get('/all', authenticateToken, async (req, res) => {
       ORDER BY t.date ASC, t.id ASC
     `;
     const transactionsResult = await pool.query(transactionsQuery, txnDateFilter.params);
-    let dailyTransactions = transactionsResult.rows.map(txn => ({
+    let dailyTransactionsBase = transactionsResult.rows.map(txn => ({
       id: txn.id,
       date: txn.date,
-      transactionType: 'Daily Transaction',
       category: txn.category_name || '-',
       paymentType: txn.payment_type,
       chequeNumber: txn.cheque_number || '-',
@@ -282,12 +281,14 @@ router.get('/all', authenticateToken, async (req, res) => {
       startDate,
       endDate
     });
-    const pdcAsDaily = pdcRows.map((pdc) =>
-      mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'Daily Transaction' })
-    );
-    const mainDailyRows = sortMergedByDateThenId([...dailyTransactions, ...pdcAsDaily]);
+    const pdcAsDailyBase = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
+    const mainDailyRows = sortMergedByDateThenId([...dailyTransactionsBase, ...pdcAsDailyBase]);
     await applyRunningBalancesToMainRows(mainDailyRows);
-    dailyTransactions = mainDailyRows;
+    dailyTransactionsBase = mainDailyRows;
+    const dailyTransactions = dailyTransactionsBase.map((row) => ({
+      ...row,
+      transactionType: 'Daily Transaction'
+    }));
 
     // 2. Get GCEC PDC
     const gcecPdcDateFilter = buildDateFilter('pdc.cheque_date');
@@ -432,6 +433,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     res.json({
       success: true,
       data: orderedAllTransactions,
+      transactions: dailyTransactionsBase,
       currentBalance,
       totalTransactions: orderedAllTransactions.length,
       summary: {
@@ -484,8 +486,12 @@ router.get('/', authenticateToken, async (req, res) => {
     await applyRunningBalancesToMainRows(rowsForRunningBalance);
     formattedTransactions = rowsForRunningBalance;
 
-    const currentBalance =
-      rowsForRunningBalance.length > 0
+    const lastDailyRowWithBalance = [...rowsForRunningBalance]
+      .reverse()
+      .find((row) => row.balance != null);
+    const currentBalance = lastDailyRowWithBalance
+      ? lastDailyRowWithBalance.balance
+      : rowsForRunningBalance.length > 0
         ? rowsForRunningBalance[rowsForRunningBalance.length - 1].balance
         : '0.00';
 

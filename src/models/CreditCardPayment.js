@@ -2,8 +2,28 @@ const { pool } = require('../config/database');
 
 class CreditCardPayment {
   // Get all credit card payments
-  static async getAll() {
+  static async getAll(filters = {}) {
     try {
+      const { year, months, paidAgainst } = filters;
+      const whereClauses = [];
+      const params = [];
+
+      if (year !== undefined && year !== null && String(year).trim() !== '') {
+        whereClauses.push('YEAR(ccp.payment_date) = ?');
+        params.push(Number(year));
+      }
+
+      if (months !== undefined && months !== null && String(months).trim() !== '') {
+        whereClauses.push('MONTH(ccp.payment_date) = ?');
+        params.push(Number(months));
+      }
+
+      if (paidAgainst !== undefined && paidAgainst !== null && String(paidAgainst).trim() !== '') {
+        whereClauses.push('ccp.paid_against = ?');
+        params.push(String(paidAgainst).trim());
+      }
+
+      const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
       const result = await pool.query(`
         SELECT 
           ccp.id,
@@ -13,6 +33,7 @@ class CreditCardPayment {
           ccp.payment_method,
           ccp.amount,
           ccp.remarks,
+          ccp.paid_against,
           ccp.created_by,
           u.username as created_by_username,
           ccp.created_at,
@@ -24,8 +45,9 @@ class CreditCardPayment {
         FROM credit_card_payments ccp
         LEFT JOIN users u ON ccp.created_by = u.id
         LEFT JOIN credit_cards_new c ON ccp.credit_card_id = c.id
+        ${whereSql}
         ORDER BY ccp.payment_date DESC, ccp.created_at DESC
-      `);
+      `, params);
       return result.rows;
     } catch (error) {
       throw error;
@@ -44,6 +66,7 @@ class CreditCardPayment {
           ccp.payment_method,
           ccp.amount,
           ccp.remarks,
+          ccp.paid_against,
           ccp.created_by,
           u.username as created_by_username,
           ccp.created_at,
@@ -71,12 +94,12 @@ class CreditCardPayment {
   // Create a new credit card payment
   static async create(paymentData) {
     try {
-      const { paymentDate, creditCardId, customerName, paymentMethod, amount, remarks, createdBy } = paymentData;
+      const { paymentDate, creditCardId, customerName, paymentMethod, amount, remarks, paidAgainst, createdBy } = paymentData;
 
       const result = await pool.query(
         `INSERT INTO credit_card_payments 
-         (payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (payment_date, credit_card_id, customer_name, payment_method, amount, remarks, paid_against, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           paymentDate,
           creditCardId || null,
@@ -84,11 +107,12 @@ class CreditCardPayment {
           paymentMethod || 'Credit Card',
           amount,
           remarks || null,
+          paidAgainst || null,
           createdBy || null
         ]
       );
       const fetchResult = await pool.query(
-        'SELECT id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, created_by, created_at, updated_at FROM credit_card_payments WHERE id = LAST_INSERT_ID()'
+        'SELECT id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, paid_against, created_by, created_at, updated_at FROM credit_card_payments WHERE id = LAST_INSERT_ID()'
       );
 
       // Get card details and created_by username
@@ -132,7 +156,7 @@ class CreditCardPayment {
   // Update a credit card payment
   static async update(id, paymentData) {
     try {
-      const { paymentDate, creditCardId, customerName, paymentMethod, amount, remarks } = paymentData;
+      const { paymentDate, creditCardId, customerName, paymentMethod, amount, remarks, paidAgainst } = paymentData;
 
       const updateFields = [];
       const values = [];
@@ -143,6 +167,7 @@ class CreditCardPayment {
       if (paymentMethod !== undefined) { updateFields.push('payment_method = ?'); values.push(paymentMethod || 'Credit Card'); }
       if (amount !== undefined) { updateFields.push('amount = ?'); values.push(amount); }
       if (remarks !== undefined) { updateFields.push('remarks = ?'); values.push(remarks || null); }
+      if (paidAgainst !== undefined) { updateFields.push('paid_against = ?'); values.push(paidAgainst || null); }
 
       if (updateFields.length === 0) return await this.getById(id);
 

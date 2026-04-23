@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS credit_card_payments (
   payment_method VARCHAR(50) NOT NULL DEFAULT 'Credit Card',
   amount DECIMAL(15, 2) NOT NULL,
   remarks TEXT,
+  paid_against VARCHAR(255),
   created_by INT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -225,6 +226,21 @@ CREATE TABLE IF NOT EXISTS gbp_transactions (
   KEY idx_gbp_transactions_date (date),
   KEY idx_gbp_transactions_account (account_number),
   CONSTRAINT fk_gbp_transactions_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS daily_bank_statements (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  singleton_key TINYINT NOT NULL DEFAULT 1,
+  original_filename VARCHAR(512) NOT NULL,
+  stored_filename VARCHAR(512) NOT NULL,
+  file_path VARCHAR(1024) NOT NULL,
+  mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
+  file_size BIGINT NULL,
+  uploaded_by INT NULL,
+  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key),
+  CONSTRAINT fk_daily_bank_statements_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS emirates_transactions (
