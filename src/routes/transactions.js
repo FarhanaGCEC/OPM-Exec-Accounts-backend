@@ -50,23 +50,13 @@ function getBalanceCellBgColorByRemarks(remarks) {
 /**
  * Daily transition PDC rows:
  * - all matured PDC (cheque_date <= today) for GCEC/Customer/Custom
- * - upcoming GCEC only (cheque_date <= today + lookaheadDays)
  * Optional startDate/endDate filter on cheque_date (for /all); omit for full history on GET /.
  */
-async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate, lookaheadDays = 0 } = {}) {
-  const safeLookahead = Number.isInteger(lookaheadDays) && lookaheadDays >= 0 ? lookaheadDays : 0;
+async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
   const conditions = [
-    `(
-      (pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))
-      OR
-      (
-        pdc.pdc_type = 'GCEC PDC'
-        AND pdc.cheque_date > CURDATE()
-        AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
-      )
-    )`
+    `(pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))`
   ];
-  const params = [safeLookahead];
+  const params = [];
   if (startDate) {
     conditions.push('pdc.cheque_date >= ?');
     params.push(startDate);
@@ -290,8 +280,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     // PDCs whose cheque date has arrived: Daily Transaction rows dated as cheque_date (same range as filters when set)
     const pdcRows = await fetchPdcRowsMaturedForDailyLedger({
       startDate,
-      endDate,
-      lookaheadDays: 30
+      endDate
     });
     const pdcAsDaily = pdcRows.map((pdc) =>
       mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'Daily Transaction' })
@@ -489,7 +478,7 @@ router.get('/', authenticateToken, async (req, res) => {
       createdAt: txn.created_at
     }));
 
-    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({ lookaheadDays: 30 });
+    const pdcRows = await fetchPdcRowsMaturedForDailyLedger();
     const synthetic = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
     const rowsForRunningBalance = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
     await applyRunningBalancesToMainRows(rowsForRunningBalance);
