@@ -654,7 +654,7 @@ const initDatabase = async () => {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS daily_bank_statements (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        singleton_key TINYINT NOT NULL DEFAULT 1,
+        currency ENUM('AED', 'USD', 'GBP') NOT NULL DEFAULT 'AED',
         original_filename VARCHAR(512) NOT NULL,
         stored_filename VARCHAR(512) NOT NULL,
         file_path VARCHAR(1024) NOT NULL,
@@ -663,15 +663,16 @@ const initDatabase = async () => {
         uploaded_by INT NULL,
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key),
+        UNIQUE KEY uk_daily_bank_statement_currency (currency),
         CONSTRAINT fk_daily_bank_statements_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
 
     if (await tableExists('daily_bank_statements')) {
-      if (!(await columnExists('daily_bank_statements', 'singleton_key'))) {
+      if (!(await columnExists('daily_bank_statements', 'currency'))) {
         await pool.query(
-          'ALTER TABLE daily_bank_statements ADD COLUMN singleton_key TINYINT NOT NULL DEFAULT 1'
+          `ALTER TABLE daily_bank_statements
+           ADD COLUMN currency ENUM('AED', 'USD', 'GBP') NOT NULL DEFAULT 'AED'`
         );
       }
       if (!(await columnExists('daily_bank_statements', 'original_filename'))) {
@@ -710,9 +711,15 @@ const initDatabase = async () => {
         );
       }
     }
-    if (!(await indexExists('daily_bank_statements', 'uk_daily_bank_statement_singleton'))) {
+
+    if (await indexExists('daily_bank_statements', 'uk_daily_bank_statement_singleton')) {
       await pool.query(
-        'ALTER TABLE daily_bank_statements ADD UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key)'
+        'ALTER TABLE daily_bank_statements DROP INDEX uk_daily_bank_statement_singleton'
+      );
+    }
+    if (!(await indexExists('daily_bank_statements', 'uk_daily_bank_statement_currency'))) {
+      await pool.query(
+        'ALTER TABLE daily_bank_statements ADD UNIQUE KEY uk_daily_bank_statement_currency (currency)'
       );
     }
 

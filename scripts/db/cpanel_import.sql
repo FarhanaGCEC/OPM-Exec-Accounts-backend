@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS gbp_transactions (
 
 CREATE TABLE IF NOT EXISTS daily_bank_statements (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  singleton_key TINYINT NOT NULL DEFAULT 1,
+  currency ENUM('AED', 'USD', 'GBP') NOT NULL DEFAULT 'AED',
   original_filename VARCHAR(512) NOT NULL,
   stored_filename VARCHAR(512) NOT NULL,
   file_path VARCHAR(1024) NOT NULL,
@@ -239,7 +239,7 @@ CREATE TABLE IF NOT EXISTS daily_bank_statements (
   uploaded_by INT NULL,
   uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_daily_bank_statement_singleton (singleton_key),
+  UNIQUE KEY uk_daily_bank_statement_currency (currency),
   CONSTRAINT fk_daily_bank_statements_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
