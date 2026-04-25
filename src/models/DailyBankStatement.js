@@ -1,4 +1,6 @@
 const { pool } = require('../config/database');
+const fs = require('fs');
+const path = require('path');
 
 class DailyBankStatement {
   static async getCurrent(currency = 'AED') {
@@ -11,6 +13,9 @@ class DailyBankStatement {
          file_path,
          mime_type,
          file_size,
+         statement_total_debit_amount,
+         statement_total_credit_amount,
+         statement_ledger_balance,
          uploaded_by,
          uploaded_at,
          updated_at
@@ -23,11 +28,33 @@ class DailyBankStatement {
     return result.rows[0] || null;
   }
 
-  static async upsert({ currency = 'AED', originalFilename, storedFilename, filePath, mimeType, fileSize, uploadedBy }) {
+  static async upsert({
+    currency = 'AED',
+    originalFilename,
+    storedFilename,
+    filePath,
+    mimeType,
+    fileSize,
+    uploadedBy,
+    statementTotalDebitAmount = null,
+    statementTotalCreditAmount = null,
+    statementLedgerBalance = null
+  }) {
     await pool.query(
       `INSERT INTO daily_bank_statements
-       (currency, original_filename, stored_filename, file_path, mime_type, file_size, uploaded_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+       (
+         currency,
+         original_filename,
+         stored_filename,
+         file_path,
+         mime_type,
+         file_size,
+         uploaded_by,
+         statement_total_debit_amount,
+         statement_total_credit_amount,
+         statement_ledger_balance
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          original_filename = VALUES(original_filename),
          stored_filename = VALUES(stored_filename),
@@ -35,6 +62,9 @@ class DailyBankStatement {
          mime_type = VALUES(mime_type),
          file_size = VALUES(file_size),
          uploaded_by = VALUES(uploaded_by),
+         statement_total_debit_amount = VALUES(statement_total_debit_amount),
+         statement_total_credit_amount = VALUES(statement_total_credit_amount),
+         statement_ledger_balance = VALUES(statement_ledger_balance),
          uploaded_at = CURRENT_TIMESTAMP,
          updated_at = CURRENT_TIMESTAMP`,
       [
@@ -44,7 +74,10 @@ class DailyBankStatement {
         filePath,
         mimeType || 'application/pdf',
         fileSize || null,
-        uploadedBy || null
+        uploadedBy || null,
+        statementTotalDebitAmount,
+        statementTotalCreditAmount,
+        statementLedgerBalance
       ]
     );
 
@@ -53,6 +86,48 @@ class DailyBankStatement {
 
   static async clear(currency = 'AED') {
     await pool.query('DELETE FROM daily_bank_statements WHERE currency = ?', [currency]);
+  }
+
+  static async resolveReadableFilePath(record) {
+    if (!record) return null;
+
+    const basenameFromPath = record.file_path ? path.basename(record.file_path) : null;
+    const filename = record.stored_filename || basenameFromPath;
+    const cwd = process.cwd();
+    const parent = path.dirname(cwd);
+    const candidateDirs = [
+      cwd,
+      parent,
+      path.join(cwd, 'build'),
+      path.join(parent, 'build'),
+      path.join(cwd, 'uploads'),
+      path.join(parent, 'uploads')
+    ];
+
+    const dirCandidates = [];
+    for (const baseDir of candidateDirs) {
+      dirCandidates.push(path.join(baseDir, 'daily-bank-statements'));
+      dirCandidates.push(path.join(baseDir, 'uploads', 'daily-bank-statements'));
+      dirCandidates.push(path.join(baseDir, 'build', 'daily-bank-statements'));
+      dirCandidates.push(path.join(baseDir, 'build', 'uploads', 'daily-bank-statements'));
+    }
+
+    const uniqueDirs = Array.from(new Set(dirCandidates));
+    const candidates = [
+      record.file_path,
+      ...(filename ? uniqueDirs.map((dir) => path.join(dir, filename)) : [])
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      try {
+        await fs.promises.access(candidate, fs.constants.F_OK);
+        return candidate;
+      } catch (_error) {
+        // Try next candidate path.
+      }
+    }
+
+    return null;
   }
 }
 

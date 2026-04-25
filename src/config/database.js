@@ -660,6 +660,9 @@ const initDatabase = async () => {
         file_path VARCHAR(1024) NOT NULL,
         mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
         file_size BIGINT NULL,
+        statement_total_debit_amount DECIMAL(15, 2) NULL,
+        statement_total_credit_amount DECIMAL(15, 2) NULL,
+        statement_ledger_balance DECIMAL(15, 2) NULL,
         uploaded_by INT NULL,
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -700,6 +703,21 @@ const initDatabase = async () => {
           'ALTER TABLE daily_bank_statements ADD COLUMN file_size BIGINT NULL'
         );
       }
+      if (!(await columnExists('daily_bank_statements', 'statement_total_debit_amount'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN statement_total_debit_amount DECIMAL(15, 2) NULL'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'statement_total_credit_amount'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN statement_total_credit_amount DECIMAL(15, 2) NULL'
+        );
+      }
+      if (!(await columnExists('daily_bank_statements', 'statement_ledger_balance'))) {
+        await pool.query(
+          'ALTER TABLE daily_bank_statements ADD COLUMN statement_ledger_balance DECIMAL(15, 2) NULL'
+        );
+      }
       if (!(await columnExists('daily_bank_statements', 'uploaded_by'))) {
         await pool.query(
           'ALTER TABLE daily_bank_statements ADD COLUMN uploaded_by INT NULL'
@@ -720,6 +738,110 @@ const initDatabase = async () => {
     if (!(await indexExists('daily_bank_statements', 'uk_daily_bank_statement_currency'))) {
       await pool.query(
         'ALTER TABLE daily_bank_statements ADD UNIQUE KEY uk_daily_bank_statement_currency (currency)'
+      );
+    }
+
+    // Create monthly_bank_statements (one row per month + currency, with two PDFs)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS monthly_bank_statements (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        month_period CHAR(7) NOT NULL,
+        currency ENUM('AED', 'USD', 'GBP') NOT NULL DEFAULT 'AED',
+        bank_statement_original_filename VARCHAR(512) NOT NULL,
+        bank_statement_stored_filename VARCHAR(512) NOT NULL,
+        bank_statement_file_path VARCHAR(1024) NOT NULL,
+        bank_statement_mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
+        bank_statement_file_size BIGINT NULL,
+        monthly_invoice_original_filename VARCHAR(512) NOT NULL,
+        monthly_invoice_stored_filename VARCHAR(512) NOT NULL,
+        monthly_invoice_file_path VARCHAR(1024) NOT NULL,
+        monthly_invoice_mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
+        monthly_invoice_file_size BIGINT NULL,
+        uploaded_by INT NULL,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_monthly_bank_statement_month_currency (month_period, currency),
+        CONSTRAINT fk_monthly_bank_statements_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `);
+
+    if (await tableExists('monthly_bank_statements')) {
+      if (!(await columnExists('monthly_bank_statements', 'month_period'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN month_period CHAR(7) NOT NULL DEFAULT "1970-01"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'currency'))) {
+        await pool.query(
+          `ALTER TABLE monthly_bank_statements
+           ADD COLUMN currency ENUM('AED', 'USD', 'GBP') NOT NULL DEFAULT 'AED'`
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'bank_statement_original_filename'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN bank_statement_original_filename VARCHAR(512) NOT NULL DEFAULT "bank-statement.pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'bank_statement_stored_filename'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN bank_statement_stored_filename VARCHAR(512) NOT NULL DEFAULT "bank-statement.pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'bank_statement_file_path'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN bank_statement_file_path VARCHAR(1024) NOT NULL DEFAULT ""'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'bank_statement_mime_type'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN bank_statement_mime_type VARCHAR(100) NOT NULL DEFAULT "application/pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'bank_statement_file_size'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN bank_statement_file_size BIGINT NULL'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'monthly_invoice_original_filename'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN monthly_invoice_original_filename VARCHAR(512) NOT NULL DEFAULT "monthly-invoice.pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'monthly_invoice_stored_filename'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN monthly_invoice_stored_filename VARCHAR(512) NOT NULL DEFAULT "monthly-invoice.pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'monthly_invoice_file_path'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN monthly_invoice_file_path VARCHAR(1024) NOT NULL DEFAULT ""'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'monthly_invoice_mime_type'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN monthly_invoice_mime_type VARCHAR(100) NOT NULL DEFAULT "application/pdf"'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'monthly_invoice_file_size'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN monthly_invoice_file_size BIGINT NULL'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'uploaded_by'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN uploaded_by INT NULL'
+        );
+      }
+      if (!(await columnExists('monthly_bank_statements', 'uploaded_at'))) {
+        await pool.query(
+          'ALTER TABLE monthly_bank_statements ADD COLUMN uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+        );
+      }
+    }
+
+    if (!(await indexExists('monthly_bank_statements', 'uk_monthly_bank_statement_month_currency'))) {
+      await pool.query(
+        'ALTER TABLE monthly_bank_statements ADD UNIQUE KEY uk_monthly_bank_statement_month_currency (month_period, currency)'
       );
     }
 

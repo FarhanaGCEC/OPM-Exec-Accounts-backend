@@ -4,6 +4,7 @@ const path = require('path');
 const { authenticateToken } = require('../middleware/auth');
 const { dailyBankStatementUploadMiddleware } = require('../middleware/dailyBankStatementUpload');
 const DailyBankStatement = require('../models/DailyBankStatement');
+const { parseStatementTotalsFromPdfBuffer, parseStatementTotalsFromPdfPath } = require('../utils/parseStatementTotalsFromPdf');
 
 const router = express.Router();
 
@@ -41,12 +42,43 @@ function formatResponse(record) {
   };
 }
 
+function hasExtractedAmounts(extracted) {
+  return extracted
+    && (extracted.totalDebitAmount != null
+      || extracted.totalCreditAmount != null
+      || extracted.ledgerBalance != null);
+}
+
+function getExtractedTotalsFromRecord(record) {
+  if (!record) return null;
+  const extracted = {
+    totalDebitAmount: record.statement_total_debit_amount != null ? Number(record.statement_total_debit_amount) : null,
+    totalCreditAmount: record.statement_total_credit_amount != null ? Number(record.statement_total_credit_amount) : null,
+    ledgerBalance: record.statement_ledger_balance != null ? Number(record.statement_ledger_balance) : null
+  };
+  return hasExtractedAmounts(extracted) ? extracted : null;
+}
+
 router.get('/', authenticateToken, async (_req, res) => {
   try {
     const current = await DailyBankStatement.getCurrent();
+    let extractedTotals = getExtractedTotalsFromRecord(current);
+    if (!extractedTotals) {
+      const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
+      if (readablePath) {
+        try {
+          extractedTotals = await parseStatementTotalsFromPdfPath(readablePath);
+        } catch (parseError) {
+          console.error('Failed to parse uploaded daily bank statement PDF:', parseError.message);
+        }
+      }
+    }
     return res.json({
       success: true,
-      data: formatResponse(current)
+      data: {
+        ...formatResponse(current),
+        extracted_totals: hasExtractedAmounts(extractedTotals) ? extractedTotals : null
+      }
     });
   } catch (error) {
     console.error('GET daily bank statement error:', error);
@@ -67,7 +99,14 @@ router.get('/file', authenticateToken, async (_req, res) => {
       });
     }
 
-    const absolutePath = path.resolve(current.file_path);
+    const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
+    if (!readablePath) {
+      return res.status(404).json({
+        success: false,
+        error: 'PDF file not found on server'
+      });
+    }
+    const absolutePath = path.resolve(readablePath);
     if (!absolutePath.startsWith(path.resolve(UPLOAD_DIR))) {
       return res.status(400).json({
         success: false,
@@ -110,6 +149,14 @@ router.post('/', authenticateToken, dailyBankStatementUploadMiddleware, async (r
 
     await fs.promises.writeFile(newFilePath, req.file.buffer);
 
+    let extractedTotals = null;
+    try {
+      extractedTotals = await parseStatementTotalsFromPdfBuffer(req.file.buffer);
+    } catch (parseError) {
+      // Upload must not fail just because extraction failed.
+      console.error('Failed to parse uploaded daily bank statement PDF during upload:', parseError.message);
+    }
+
     const previous = await DailyBankStatement.getCurrent();
     const saved = await DailyBankStatement.upsert({
       originalFilename: safeOriginal,
@@ -117,7 +164,10 @@ router.post('/', authenticateToken, dailyBankStatementUploadMiddleware, async (r
       filePath: newFilePath,
       mimeType: req.file.mimetype || 'application/pdf',
       fileSize: req.file.size || null,
-      uploadedBy: req.user?.id || null
+      uploadedBy: req.user?.id || null,
+      statementTotalDebitAmount: extractedTotals?.totalDebitAmount ?? null,
+      statementTotalCreditAmount: extractedTotals?.totalCreditAmount ?? null,
+      statementLedgerBalance: extractedTotals?.ledgerBalance ?? null
     });
 
     if (previous && previous.file_path && previous.file_path !== newFilePath) {
@@ -127,7 +177,10 @@ router.post('/', authenticateToken, dailyBankStatementUploadMiddleware, async (r
     return res.status(201).json({
       success: true,
       message: 'Daily bank statement uploaded successfully. Previous PDF replaced.',
-      data: formatResponse(saved)
+      data: {
+        ...formatResponse(saved),
+        extracted_totals: hasExtractedAmounts(extractedTotals) ? extractedTotals : null
+      }
     });
   } catch (error) {
     if (newFilePath) {
@@ -137,6 +190,59 @@ router.post('/', authenticateToken, dailyBankStatementUploadMiddleware, async (r
     return res.status(500).json({
       success: false,
       error: 'Failed to upload daily bank statement PDF'
+    });
+  }
+});
+
+router.get('/extracted-totals', authenticateToken, async (_req, res) => {
+  try {
+    const current = await DailyBankStatement.getCurrent();
+    if (!current) {
+      return res.status(404).json({
+        success: false,
+        error: 'No daily bank statement PDF found'
+      });
+    }
+
+    const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
+    if (!readablePath) {
+      return res.status(404).json({
+        success: false,
+        error: 'PDF file not found on server'
+      });
+    }
+    const absolutePath = path.resolve(readablePath);
+    if (!absolutePath.startsWith(path.resolve(UPLOAD_DIR))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid file path'
+      });
+    }
+
+    await fs.promises.access(absolutePath, fs.constants.F_OK);
+    const extractedTotals = await parseStatementTotalsFromPdfPath(absolutePath);
+    if (!hasExtractedAmounts(extractedTotals)) {
+      return res.status(422).json({
+        success: false,
+        error: 'Unable to extract required totals from the uploaded PDF'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: extractedTotals
+    });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return res.status(404).json({
+        success: false,
+        error: 'PDF file not found on server'
+      });
+    }
+    console.error('GET daily bank statement extracted totals error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to extract totals from daily bank statement PDF'
     });
   }
 });
