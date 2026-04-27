@@ -1,7 +1,9 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
+const { authorizeRoles } = require('../middleware/authorizeRoles');
+const { USER_ROLES } = require('../constants/roles');
 const { monthlyBankStatementUploadMiddleware } = require('../middleware/monthlyBankStatementUpload');
 const MonthlyBankStatement = require('../models/MonthlyBankStatement');
 
@@ -78,7 +80,7 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/file/:type', authenticateToken, async (req, res) => {
+router.get('/file/:type', authenticateTokenOrQuery, async (req, res) => {
   try {
     const monthPeriod = normalizeMonth(req.query.month);
     const currency = normalizeCurrency(req.query.currency);
@@ -99,7 +101,10 @@ router.get('/file/:type', authenticateToken, async (req, res) => {
     if (!absolutePath.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).json({ success: false, error: 'Invalid file path' });
 
     await fs.promises.access(absolutePath, fs.constants.F_OK);
-    return res.download(absolutePath, downloadName);
+    const viewName = downloadName || 'monthly-bank-statement.pdf';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
+    return res.sendFile(absolutePath);
   } catch (error) {
     if (error.code === 'ENOENT') return res.status(404).json({ success: false, error: 'PDF file not found on server' });
     console.error('DOWNLOAD monthly bank statement error:', error);
@@ -107,7 +112,12 @@ router.get('/file/:type', authenticateToken, async (req, res) => {
   }
 });
 
-router.post('/', authenticateToken, monthlyBankStatementUploadMiddleware, async (req, res) => {
+router.post(
+  '/',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
+  monthlyBankStatementUploadMiddleware,
+  async (req, res) => {
   let bankStatementFilePath;
   let monthlyInvoiceFilePath;
   try {
@@ -173,7 +183,11 @@ router.post('/', authenticateToken, monthlyBankStatementUploadMiddleware, async 
   }
 });
 
-router.delete('/', authenticateToken, async (req, res) => {
+router.delete(
+  '/',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
+  async (req, res) => {
   try {
     const monthPeriod = normalizeMonth(req.query.month);
     const currency = normalizeCurrency(req.query.currency);

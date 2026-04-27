@@ -1,6 +1,6 @@
 const express = require('express');
 const StatementController = require('../controllers/statementController');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const {
   statementPdfUploadMiddleware,
@@ -44,7 +44,7 @@ router.get('/', authenticateToken, StatementController.listStatements);
 // Statement PDF attachment (before POST /:id and GET /:month)
 router.get(
   '/:id/attachment',
-  authenticateToken,
+  authenticateTokenOrQuery,
   StatementController.downloadStatementAttachment
 );
 router.post(

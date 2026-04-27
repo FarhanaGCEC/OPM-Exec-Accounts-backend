@@ -1,7 +1,9 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
+const { authorizeRoles } = require('../middleware/authorizeRoles');
+const { USER_ROLES } = require('../constants/roles');
 const { dailyBankStatementUploadMiddleware } = require('../middleware/dailyBankStatementUpload');
 const DailyBankStatement = require('../models/DailyBankStatement');
 const { parseStatementTotalsFromPdfBuffer, parseStatementTotalsFromPdfPath } = require('../utils/parseStatementTotalsFromPdf');
@@ -89,7 +91,7 @@ router.get('/', authenticateToken, async (_req, res) => {
   }
 });
 
-router.get('/file', authenticateToken, async (_req, res) => {
+router.get('/file', authenticateTokenOrQuery, async (_req, res) => {
   try {
     const current = await DailyBankStatement.getCurrent();
     if (!current) {
@@ -115,7 +117,10 @@ router.get('/file', authenticateToken, async (_req, res) => {
     }
 
     await fs.promises.access(absolutePath, fs.constants.F_OK);
-    return res.download(absolutePath, current.original_filename || current.stored_filename);
+    const viewName = current.original_filename || current.stored_filename || 'daily-bank-statement.pdf';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
+    return res.sendFile(absolutePath);
   } catch (error) {
     if (error.code === 'ENOENT') {
       return res.status(404).json({
@@ -131,7 +136,12 @@ router.get('/file', authenticateToken, async (_req, res) => {
   }
 });
 
-router.post('/', authenticateToken, dailyBankStatementUploadMiddleware, async (req, res) => {
+router.post(
+  '/',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
+  dailyBankStatementUploadMiddleware,
+  async (req, res) => {
   let newFilePath;
   try {
     if (!req.file) {
@@ -247,7 +257,11 @@ router.get('/extracted-totals', authenticateToken, async (_req, res) => {
   }
 });
 
-router.delete('/', authenticateToken, async (_req, res) => {
+router.delete(
+  '/',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
+  async (_req, res) => {
   try {
     const current = await DailyBankStatement.getCurrent();
     if (!current) {

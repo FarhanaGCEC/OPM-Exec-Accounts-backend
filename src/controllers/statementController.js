@@ -1000,11 +1000,13 @@ class StatementController {
         });
       }
 
-      const downloadName = row.attachment_name || 'statement.pdf';
-      res.download(absPath, downloadName, (err) => {
+      const viewName = row.attachment_name || 'statement.pdf';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
+      return res.sendFile(absPath, (err) => {
         if (err && !res.headersSent) {
           console.error('Error sending statement PDF:', err.message);
-          res.status(500).json({ success: false, error: 'Failed to download file' });
+          res.status(500).json({ success: false, error: 'Failed to open file' });
         }
       });
     } catch (error) {
