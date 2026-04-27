@@ -54,7 +54,8 @@ function getBalanceCellBgColorByRemarks(remarks) {
  */
 async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
   const conditions = [
-    `(pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))`
+    `(pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))`,
+    `UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) <> 'SECURITY CHEQUE'`
   ];
   const params = [];
   if (startDate) {
@@ -1365,6 +1366,122 @@ router.put(
   }
   try {
     const { id } = req.params;
+    const pdcDueMatch = PDC_DUE_ID_RE.exec(String(id || '').trim());
+    if (pdcDueMatch) {
+      const pdcId = parseInt(pdcDueMatch[1], 10);
+      const existingPdc = await PDC.getById(pdcId);
+      if (!existingPdc) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+
+      const validChequeTypes = ['Payment Cheque', 'Security Cheque', 'Other'];
+      const validPDCTypes = ['GCEC PDC', 'Customer PDC', 'Custom PDC'];
+      const body = req.body || {};
+      const inputDate = body.chequeDate ?? body.cheque_date ?? body.date ?? existingPdc.cheque_date;
+      const amountRaw =
+        body.amount != null && body.amount !== ''
+          ? body.amount
+          : body.debit != null && body.debit !== ''
+            ? body.debit
+            : body.credit != null && body.credit !== ''
+              ? body.credit
+              : existingPdc.amount;
+      const chequeNumber = body.chequeNumber ?? body.cheque_number ?? existingPdc.cheque_number;
+      const customerName =
+        body.customerName ??
+        body.customer_name ??
+        body.customer ??
+        body.category ??
+        existingPdc.customer_name;
+      const chequeType = body.chequeType ?? body.cheque_type ?? existingPdc.cheque_type;
+      const pdcType = body.pdcType ?? body.pdc_type ?? existingPdc.pdc_type;
+      const description = body.description ?? body.description_text ?? existingPdc.description;
+
+      if (!inputDate || !chequeNumber || !customerName || amountRaw == null || !chequeType || !pdcType) {
+        return res.status(400).json({
+          success: false,
+          error: 'Date, cheque number, customer name, amount, cheque type, and PDC type are required for PDC daily rows'
+        });
+      }
+      if (!validChequeTypes.includes(String(chequeType))) {
+        return res.status(400).json({
+          success: false,
+          error: `Cheque type must be one of: ${validChequeTypes.join(', ')}`
+        });
+      }
+      if (!validPDCTypes.includes(String(pdcType))) {
+        return res.status(400).json({
+          success: false,
+          error: `PDC type must be one of: ${validPDCTypes.join(', ')}`
+        });
+      }
+
+      const parsedAmount = parseLooseAmount(amountRaw);
+      if (Number.isNaN(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Amount must be greater than 0'
+        });
+      }
+
+      let formattedDate = String(inputDate);
+      if (formattedDate.includes('/')) {
+        const [day, month, year] = formattedDate.split('/');
+        formattedDate = `${year}-${month}-${day}`;
+      }
+
+      if (pdcType === 'Custom PDC' && (!description || String(description).trim() === '')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Description is required for Custom PDC'
+        });
+      }
+
+      const updatedPdc = await PDC.update(pdcId, {
+        chequeDate: formattedDate,
+        chequeNumber: String(chequeNumber).trim(),
+        customerName: String(customerName).trim(),
+        amount: roundToTwoDecimals(parsedAmount),
+        chequeType: String(chequeType),
+        pdcType: String(pdcType),
+        description: description ? String(description).trim() : null
+      });
+      if (!updatedPdc) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+
+      const todayYmd = toYmd(new Date());
+      const isCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
+      const isGcec = isGcecPdcType(updatedPdc.pdc_type);
+      const ledgerApproved = parseDailyLedgerApproved(updatedPdc.daily_ledger_approved);
+      const isCredit = (isGcec && updatedPdc.cheque_date > todayYmd) || (isCustomerPdc && ledgerApproved);
+
+      return res.json({
+        success: true,
+        message: 'Daily transition PDC updated successfully',
+        data: {
+          id: `pdc-due-${updatedPdc.id}`,
+          pdcId: updatedPdc.id,
+          date: updatedPdc.cheque_date,
+          category: updatedPdc.customer_name || '-',
+          paymentType: 'cheque',
+          chequeNumber: updatedPdc.cheque_number || '-',
+          debit: isCredit ? null : formatAmount(updatedPdc.amount),
+          credit: isCredit ? formatAmount(updatedPdc.amount) : null,
+          remarks: updatedPdc.description
+            ? `${updatedPdc.pdc_type}, ${updatedPdc.description}`
+            : updatedPdc.pdc_type,
+          pdcType: updatedPdc.pdc_type
+        }
+      });
+    }
+
     const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
 
     // Validation
@@ -1471,6 +1588,22 @@ router.delete(
   }
   try {
     const { id } = req.params;
+    const pdcDueMatch = PDC_DUE_ID_RE.exec(String(id || '').trim());
+    if (pdcDueMatch) {
+      const pdcId = parseInt(pdcDueMatch[1], 10);
+      const deletedPdc = await PDC.delete(pdcId);
+      if (!deletedPdc) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+      return res.json({
+        success: true,
+        message: 'Post-dated cheque deleted successfully'
+      });
+    }
+
     const deleted = await Transaction.delete(id);
 
     if (!deleted) {

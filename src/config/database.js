@@ -293,7 +293,7 @@ const initDatabase = async () => {
         id INT AUTO_INCREMENT PRIMARY KEY,
         username VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
-        role ENUM('admin', 'accountant', 'user') NOT NULL DEFAULT 'user',
+        role ENUM('admin', 'accountant', 'user', 'viewer') NOT NULL DEFAULT 'user',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -302,7 +302,13 @@ const initDatabase = async () => {
       if (!(await columnExists('users', 'role'))) {
         await pool.query(`
           ALTER TABLE users
-          ADD COLUMN role ENUM('admin', 'accountant', 'user') NOT NULL DEFAULT 'user'
+          ADD COLUMN role ENUM('admin', 'accountant', 'user', 'viewer') NOT NULL DEFAULT 'user'
+        `);
+      } else {
+        // Keep existing databases in sync with new supported role values.
+        await pool.query(`
+          ALTER TABLE users
+          MODIFY COLUMN role ENUM('admin', 'accountant', 'user', 'viewer') NOT NULL DEFAULT 'user'
         `);
       }
       if (!(await columnExists('users', 'sidebar_permissions'))) {
@@ -593,6 +599,7 @@ const initDatabase = async () => {
         invoice_number VARCHAR(255),
         vendor_name VARCHAR(255),
         bill_number VARCHAR(255),
+        paid_against VARCHAR(255),
         payment_method VARCHAR(50) NOT NULL DEFAULT 'Credit Card',
         amount DECIMAL(15, 2) NOT NULL,
         description TEXT,
@@ -603,6 +610,13 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    if (await tableExists('purchase_bills')) {
+      if (!(await columnExists('purchase_bills', 'paid_against'))) {
+        await pool.query(
+          'ALTER TABLE purchase_bills ADD COLUMN paid_against VARCHAR(255) NULL'
+        );
+      }
+    }
 
     // Create usd_transactions
     await pool.query(`

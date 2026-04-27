@@ -79,6 +79,7 @@ function payloadToPurchaseBillUpdate(payload, { requireBillDateAndAmount = false
   if (p.invoice_number !== undefined) u.invoiceNumber = p.invoice_number || null;
   if (p.vendor_name !== undefined) u.vendorName = p.vendor_name || null;
   if (p.bill_number !== undefined) u.billNumber = p.bill_number || null;
+  if (p.paid_against !== undefined) u.paidAgainst = p.paid_against || null;
   if (p.payment_method !== undefined) u.paymentMethod = p.payment_method || 'Credit Card';
   if (p.description !== undefined) u.description = p.description || null;
   if (p.payment_status !== undefined) {

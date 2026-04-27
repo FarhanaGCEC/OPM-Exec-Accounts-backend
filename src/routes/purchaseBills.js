@@ -11,6 +11,23 @@ const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
 
+// Get "paid against" options from purchase bills (for credit card payment form dropdown)
+router.get('/paid-against-options', authenticateToken, async (_req, res) => {
+  try {
+    const options = await PurchaseBill.getPaidAgainstOptions();
+    res.json({
+      success: true,
+      data: options
+    });
+  } catch (error) {
+    console.error('Error fetching purchase bill paid-against options:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch paid against options'
+    });
+  }
+});
+
 // Get all purchase bills
 router.get('/', authenticateToken, async (req, res) => {
   try {
@@ -70,6 +87,8 @@ router.post('/', authenticateToken, async (req, res) => {
       invoice_number,
       vendor_name,
       bill_number,
+      paid_against,
+      paidAgainst,
       payment_method,
       amount,
       description,
@@ -152,6 +171,7 @@ router.post('/', authenticateToken, async (req, res) => {
       invoiceNumber: invoice_number || null,
       vendorName: vendor_name || null,
       billNumber: bill_number || null,
+      paidAgainst: paidAgainst ?? paid_against ?? null,
       paymentMethod: payment_method || 'Credit Card',
       amount: roundedAmount,
       description: (description ?? remarks) || null,
@@ -188,6 +208,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
       invoice_number,
       vendor_name,
       bill_number,
+      paid_against,
+      paidAgainst,
       payment_method,
       amount,
       description,
@@ -265,6 +287,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
       invoiceNumber: invoice_number || null,
       vendorName: vendor_name || null,
       billNumber: bill_number || null,
+      paidAgainst: paidAgainst ?? paid_against ?? null,
       paymentMethod: payment_method || 'Credit Card',
       amount: roundedAmount,
       description: (description ?? remarks) || null,
@@ -307,6 +330,8 @@ router.patch('/:id', authenticateToken, async (req, res) => {
       invoice_number,
       vendor_name,
       bill_number,
+      paid_against,
+      paidAgainst,
       payment_method,
       amount,
       description,
@@ -377,6 +402,9 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     }
     if (bill_number !== undefined) {
       updateData.billNumber = bill_number || null;
+    }
+    if (paidAgainst !== undefined || paid_against !== undefined) {
+      updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
     }
     if (payment_method !== undefined) {
       updateData.paymentMethod = payment_method || 'Credit Card';

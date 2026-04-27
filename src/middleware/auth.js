@@ -1,8 +1,27 @@
 const jwt = require('jsonwebtoken');
 const sessionManager = require('../services/sessionManager');
 const User = require('../models/User');
+const { USER_ROLES } = require('../constants/roles');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+function isReadOnlyMethod(method) {
+  const m = String(method || 'GET').trim().toUpperCase();
+  return m === 'GET' || m === 'HEAD' || m === 'OPTIONS';
+}
+
+function enforceViewerReadOnly(req, res) {
+  const role = req.user && req.user.role;
+  if (role === USER_ROLES.VIEWER && !isReadOnlyMethod(req.method)) {
+    res.status(403).json({
+      success: false,
+      error: 'Viewer role is read-only. Add, edit, and delete actions are not allowed.',
+      code: 'VIEWER_READ_ONLY',
+    });
+    return false;
+  }
+  return true;
+}
 
 function tokenFromRequest(req) {
   const authHeader = req.headers['authorization'];
@@ -52,6 +71,9 @@ const authenticateToken = (req, res, next) => {
           username: dbUser.username,
           role: dbUser.role || 'user',
         };
+        if (!enforceViewerReadOnly(req, res)) {
+          return;
+        }
         next();
       } catch (e) {
         console.error('authenticateToken:', e);
@@ -99,6 +121,9 @@ const authenticateTokenOrQuery = (req, res, next) => {
           username: dbUser.username,
           role: dbUser.role || 'user',
         };
+        if (!enforceViewerReadOnly(req, res)) {
+          return;
+        }
         next();
       } catch (e) {
         console.error('authenticateTokenOrQuery:', e);

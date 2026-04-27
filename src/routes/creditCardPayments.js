@@ -6,6 +6,35 @@ const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
 
+function toYmd(d) {
+  if (d == null) return null;
+  if (d instanceof Date) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  const s = String(d);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+}
+
+function formatPaymentForApi(payment) {
+  return {
+    id: payment.id,
+    payment_date: toYmd(payment.payment_date),
+    card_holder: payment.card_holder || payment.customer_name || null,
+    card_no: payment.card_number || null,
+    amount: formatAmount(payment.amount),
+    remarks: payment.remarks || null,
+    paid_against: payment.paid_against || null,
+    paidAgainst: payment.paid_against || null,
+    credit_card_id: payment.credit_card_id || payment.card_id || null,
+    issuing_bank: payment.issuing_bank || null,
+    created_at: payment.created_at,
+    updated_at: payment.updated_at
+  };
+}
+
 // Get all credit card payments
 router.get('/', authenticateToken, async (req, res) => {
   try {
@@ -33,20 +62,7 @@ router.get('/', authenticateToken, async (req, res) => {
     });
     res.json({
       success: true,
-      data: payments.map(payment => ({
-        id: payment.id,
-        payment_date: payment.payment_date,
-        card_holder: payment.card_holder || payment.customer_name || null,
-        card_no: payment.card_number || null,
-        amount: formatAmount(payment.amount),
-        remarks: payment.remarks || null,
-        paid_against: payment.paid_against || null,
-        paidAgainst: payment.paid_against || null,
-        credit_card_id: payment.credit_card_id || payment.card_id || null,
-        issuing_bank: payment.issuing_bank || null,
-        created_at: payment.created_at,
-        updated_at: payment.updated_at
-      }))
+      data: payments.map((payment) => formatPaymentForApi(payment))
     });
   } catch (error) {
     console.error('Error fetching credit card payments:', error);
@@ -70,23 +86,9 @@ router.get('/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    const formattedPayment = {
-      id: payment.id,
-      payment_date: payment.payment_date,
-      card_holder: payment.card_holder || payment.customer_name || null,
-      card_no: payment.card_number || null,
-      amount: formatAmount(payment.amount),
-      remarks: payment.remarks || null,
-      paid_against: payment.paid_against || null,
-      paidAgainst: payment.paid_against || null,
-      credit_card_id: payment.credit_card_id || payment.card_id || null,
-      issuing_bank: payment.issuing_bank || null,
-      created_at: payment.created_at,
-      updated_at: payment.updated_at
-    };
     res.json({
       success: true,
-      data: formattedPayment
+      data: formatPaymentForApi(payment)
     });
   } catch (error) {
     res.status(500).json({
@@ -172,25 +174,10 @@ router.post('/', authenticateToken, async (req, res) => {
       createdBy: createdBy
     });
 
-    const formattedPayment = {
-      id: payment.id,
-      payment_date: payment.payment_date,
-      card_holder: payment.card_holder || payment.customer_name || null,
-      card_no: payment.card_number || null,
-      amount: formatAmount(payment.amount),
-      remarks: payment.remarks || null,
-      paid_against: payment.paid_against || null,
-      paidAgainst: payment.paid_against || null,
-      credit_card_id: payment.credit_card_id || payment.card_id || null,
-      issuing_bank: payment.issuing_bank || null,
-      created_at: payment.created_at,
-      updated_at: payment.updated_at
-    };
-
     res.status(201).json({
       success: true,
       message: 'Credit card payment created successfully',
-      data: formattedPayment
+      data: formatPaymentForApi(payment)
     });
   } catch (error) {
     console.error('Error creating credit card payment:', error);
@@ -206,6 +193,7 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
+    const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 
     const updateData = {};
 
@@ -268,8 +256,11 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
     if (card_holder !== undefined) {
       updateData.customerName = card_holder || null; // Keep for backward compatibility
     }
-    if (remarks !== undefined) {
+    if (hasRemarksField) {
       updateData.remarks = remarks || null;
+    } else {
+      // Frontend edit form often omits remarks when user clears it; treat as clear.
+      updateData.remarks = null;
     }
     if (paidAgainst !== undefined || paid_against !== undefined) {
       updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
@@ -284,25 +275,10 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
       });
     }
 
-    const formattedPayment = {
-      id: payment.id,
-      payment_date: payment.payment_date,
-      card_holder: payment.card_holder || payment.customer_name || null,
-      card_no: payment.card_number || null,
-      amount: formatAmount(payment.amount),
-      remarks: payment.remarks || null,
-      paid_against: payment.paid_against || null,
-      paidAgainst: payment.paid_against || null,
-      credit_card_id: payment.credit_card_id || payment.card_id || null,
-      issuing_bank: payment.issuing_bank || null,
-      created_at: payment.created_at,
-      updated_at: payment.updated_at
-    };
-
     res.json({
       success: true,
       message: 'Credit card payment updated successfully',
-      data: formattedPayment
+      data: formatPaymentForApi(payment)
     });
   } catch (error) {
     console.error('Error updating credit card payment:', error);
@@ -318,6 +294,7 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
+    const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 
     const updateData = {};
 
@@ -380,8 +357,11 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
     if (card_holder !== undefined) {
       updateData.customerName = card_holder || null;
     }
-    if (remarks !== undefined) {
+    if (hasRemarksField) {
       updateData.remarks = remarks || null;
+    } else {
+      // Frontend edit form often omits remarks when user clears it; treat as clear.
+      updateData.remarks = null;
     }
     if (paidAgainst !== undefined || paid_against !== undefined) {
       updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
@@ -396,25 +376,10 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
       });
     }
 
-    const formattedPayment = {
-      id: payment.id,
-      payment_date: payment.payment_date,
-      card_holder: payment.card_holder || payment.customer_name || null,
-      card_no: payment.card_number || null,
-      amount: formatAmount(payment.amount),
-      remarks: payment.remarks || null,
-      paid_against: payment.paid_against || null,
-      paidAgainst: payment.paid_against || null,
-      credit_card_id: payment.credit_card_id || payment.card_id || null,
-      issuing_bank: payment.issuing_bank || null,
-      created_at: payment.created_at,
-      updated_at: payment.updated_at
-    };
-
     res.json({
       success: true,
       message: 'Credit card payment updated successfully',
-      data: formattedPayment
+      data: formatPaymentForApi(payment)
     });
   } catch (error) {
     console.error('Error updating credit card payment:', error);

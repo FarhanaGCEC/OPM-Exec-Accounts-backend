@@ -191,7 +191,7 @@ async function queuePurchaseBillPatch(req, res) {
     return res.status(400).json({
       success: false,
       error:
-        'No changes to submit. Include at least one of: bill_date, amount, invoice_number, vendor_name, bill_number, payment_method, description, payment_status',
+        'No changes to submit. Include at least one of: bill_date, amount, invoice_number, vendor_name, bill_number, paid_against, payment_method, description, payment_status',
     });
   }
 

@@ -26,7 +26,7 @@ async function createUser(req, res) {
   if (!isValidUserRole(roleRaw)) {
     return res.status(400).json({
       error: 'Invalid role',
-      allowed: ['admin', 'accountant', 'user'],
+      allowed: ['admin', 'accountant', 'user', 'viewer'],
     });
   }
 
@@ -124,7 +124,7 @@ async function updateUserRole(req, res) {
   if (!isValidUserRole(roleRaw)) {
     return res.status(400).json({
       error: 'Invalid role',
-      allowed: ['admin', 'accountant', 'user'],
+      allowed: ['admin', 'accountant', 'user', 'viewer'],
     });
   }
 

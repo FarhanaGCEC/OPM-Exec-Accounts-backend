@@ -57,6 +57,7 @@ class PDC {
           pdc.updated_at
         FROM post_dated_cheques pdc
         LEFT JOIN users u ON pdc.created_by = u.id
+        WHERE pdc.cheque_date > CURDATE()
         ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
       `);
       return result.rows.map(row => this.formatDates(row));
@@ -257,12 +258,13 @@ class PDC {
 
   // Get PDCs near cheque date (for dashboard reminders)
   // Returns PDCs whose cheque_date is within the specified days range (includes both GCEC PDC and Customer PDC)
-  // Only includes future dates (upcoming cheques) - expired dates are automatically excluded
+  // Only includes strictly future dates (upcoming cheques) - today's and expired cheques are excluded
   static async getNearChequeDate(days = 30) {
     try {
       // Use PostgreSQL's CURRENT_DATE and INTERVAL for proper date arithmetic
       // This avoids timezone issues by using database server's date
-      // Only include future dates (cheque_date >= CURRENT_DATE) to exclude expired notifications
+      // Only include strictly future dates (cheque_date > CURRENT_DATE) so due-today rows
+      // are handled only in daily transactions and not shown in PDC reminders.
       const result = await pool.query(`
         SELECT 
           pdc.id,
@@ -285,7 +287,7 @@ class PDC {
         FROM post_dated_cheques pdc
         LEFT JOIN users u ON pdc.created_by = u.id
         WHERE pdc.pdc_type IN ('GCEC PDC', 'Customer PDC')
-          AND pdc.cheque_date >= CURRENT_DATE
+          AND pdc.cheque_date > CURRENT_DATE
           AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
         ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
       `, [days]);

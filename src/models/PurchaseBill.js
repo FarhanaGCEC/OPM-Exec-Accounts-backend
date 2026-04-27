@@ -1,6 +1,50 @@
 const { pool } = require('../config/database');
 
 class PurchaseBill {
+  // Values frontend can use for "paid against" in credit-card-payments.
+  static async getPaidAgainstOptions() {
+    try {
+      const result = await pool.query(`
+        SELECT
+          pb.id,
+          DATE_FORMAT(pb.bill_date, '%Y-%m-%d') AS bill_date,
+          pb.vendor_name,
+          pb.bill_number,
+          pb.invoice_number,
+          pb.payment_status
+        FROM purchase_bills pb
+        ORDER BY pb.bill_date DESC, pb.created_at DESC, pb.id DESC
+      `);
+
+      return result.rows
+        .map((row) => {
+          const billNumber = row.bill_number ? String(row.bill_number).trim() : '';
+          const invoiceNumber = row.invoice_number ? String(row.invoice_number).trim() : '';
+          const preferredValue = billNumber || invoiceNumber;
+          if (!preferredValue) return null;
+
+          const labelParts = [preferredValue];
+          if (row.vendor_name) labelParts.push(String(row.vendor_name).trim());
+          if (row.bill_date) labelParts.push(String(row.bill_date));
+          if (row.payment_status) labelParts.push(String(row.payment_status));
+
+          return {
+            id: row.id,
+            value: preferredValue,
+            label: labelParts.filter(Boolean).join(' | '),
+            billNumber: billNumber || null,
+            invoiceNumber: invoiceNumber || null,
+            vendorName: row.vendor_name || null,
+            billDate: row.bill_date || null,
+            paymentStatus: row.payment_status || null
+          };
+        })
+        .filter(Boolean);
+    } catch (error) {
+      throw error;
+    }
+  }
+
   // Get all purchase bills
   static async getAll() {
     try {
@@ -11,6 +55,7 @@ class PurchaseBill {
           pb.invoice_number,
           pb.vendor_name,
           pb.bill_number,
+          pb.paid_against,
           pb.payment_method,
           pb.amount,
           pb.description,
@@ -39,6 +84,7 @@ class PurchaseBill {
           pb.invoice_number,
           pb.vendor_name,
           pb.bill_number,
+          pb.paid_against,
           pb.payment_method,
           pb.amount,
           pb.description,
@@ -65,17 +111,29 @@ class PurchaseBill {
   // Create a new purchase bill
   static async create(billData) {
     try {
-      const { billDate, invoiceNumber, vendorName, billNumber, paymentMethod, amount, description, paymentStatus, createdBy } = billData;
+      const {
+        billDate,
+        invoiceNumber,
+        vendorName,
+        billNumber,
+        paidAgainst,
+        paymentMethod,
+        amount,
+        description,
+        paymentStatus,
+        createdBy
+      } = billData;
 
       const result = await pool.query(
         `INSERT INTO purchase_bills 
-         (bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status, created_by) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (bill_date, invoice_number, vendor_name, bill_number, paid_against, payment_method, amount, description, payment_status, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           billDate,
           invoiceNumber || null,
           vendorName || null,
           billNumber || null,
+          paidAgainst || null,
           paymentMethod || 'Credit Card',
           amount,
           description || null,
@@ -84,7 +142,7 @@ class PurchaseBill {
         ]
       );
       const fetchResult = await pool.query(
-        'SELECT id, bill_date, invoice_number, vendor_name, bill_number, payment_method, amount, description, payment_status, created_by, created_at, updated_at FROM purchase_bills WHERE id = LAST_INSERT_ID()'
+        'SELECT id, bill_date, invoice_number, vendor_name, bill_number, paid_against, payment_method, amount, description, payment_status, created_by, created_at, updated_at FROM purchase_bills WHERE id = LAST_INSERT_ID()'
       );
 
       // Get created_by username if created_by exists
@@ -112,7 +170,17 @@ class PurchaseBill {
   // Update a purchase bill
   static async update(id, billData) {
     try {
-      const { billDate, invoiceNumber, vendorName, billNumber, paymentMethod, amount, description, paymentStatus } = billData;
+      const {
+        billDate,
+        invoiceNumber,
+        vendorName,
+        billNumber,
+        paidAgainst,
+        paymentMethod,
+        amount,
+        description,
+        paymentStatus
+      } = billData;
 
       const updateFields = [];
       const values = [];
@@ -121,6 +189,7 @@ class PurchaseBill {
       if (invoiceNumber !== undefined) { updateFields.push('invoice_number = ?'); values.push(invoiceNumber || null); }
       if (vendorName !== undefined) { updateFields.push('vendor_name = ?'); values.push(vendorName || null); }
       if (billNumber !== undefined) { updateFields.push('bill_number = ?'); values.push(billNumber || null); }
+      if (paidAgainst !== undefined) { updateFields.push('paid_against = ?'); values.push(paidAgainst || null); }
       if (paymentMethod !== undefined) { updateFields.push('payment_method = ?'); values.push(paymentMethod || 'Credit Card'); }
       if (amount !== undefined) { updateFields.push('amount = ?'); values.push(amount); }
       if (description !== undefined) { updateFields.push('description = ?'); values.push(description || null); }

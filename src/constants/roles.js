@@ -2,6 +2,7 @@ const USER_ROLES = Object.freeze({
   ADMIN: 'admin',
   ACCOUNTANT: 'accountant',
   USER: 'user',
+  VIEWER: 'viewer',
 });
 
 const USER_ROLE_VALUES = Object.freeze(Object.values(USER_ROLES));

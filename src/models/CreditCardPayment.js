@@ -27,7 +27,7 @@ class CreditCardPayment {
       const result = await pool.query(`
         SELECT 
           ccp.id,
-          ccp.payment_date,
+          DATE_FORMAT(ccp.payment_date, '%Y-%m-%d') AS payment_date,
           ccp.credit_card_id,
           ccp.customer_name,
           ccp.payment_method,
@@ -60,7 +60,7 @@ class CreditCardPayment {
       const result = await pool.query(`
         SELECT 
           ccp.id,
-          ccp.payment_date,
+          DATE_FORMAT(ccp.payment_date, '%Y-%m-%d') AS payment_date,
           ccp.credit_card_id,
           ccp.customer_name,
           ccp.payment_method,
@@ -112,7 +112,20 @@ class CreditCardPayment {
         ]
       );
       const fetchResult = await pool.query(
-        'SELECT id, payment_date, credit_card_id, customer_name, payment_method, amount, remarks, paid_against, created_by, created_at, updated_at FROM credit_card_payments WHERE id = LAST_INSERT_ID()'
+        `SELECT
+          id,
+          DATE_FORMAT(payment_date, '%Y-%m-%d') AS payment_date,
+          credit_card_id,
+          customer_name,
+          payment_method,
+          amount,
+          remarks,
+          paid_against,
+          created_by,
+          created_at,
+          updated_at
+        FROM credit_card_payments
+        WHERE id = LAST_INSERT_ID()`
       );
 
       // Get card details and created_by username

@@ -151,6 +151,7 @@ router.get('/', authenticateToken, async (req, res) => {
           AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
         )
       )
+      AND UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) <> 'SECURITY CHEQUE'
       ORDER BY pdc.cheque_date ASC, pdc.created_at ASC, pdc.id ASC
       `
     );
