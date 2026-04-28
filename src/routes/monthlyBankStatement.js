@@ -41,24 +41,26 @@ async function removeFileIfExists(filePath) {
 
 function formatResponse(record) {
   if (!record) return null;
+  const hasBankStatement = Boolean(record.bank_statement_file_path);
+  const hasMonthlyInvoice = Boolean(record.monthly_invoice_file_path);
   return {
     id: record.id,
     month_period: record.month_period,
     currency: record.currency,
-    bank_statement: {
+    bank_statement: hasBankStatement ? {
       original_filename: record.bank_statement_original_filename,
       stored_filename: record.bank_statement_stored_filename,
       mime_type: record.bank_statement_mime_type,
       file_size: record.bank_statement_file_size,
       download_url: `/api/monthly-bank-statements/file/bank_statement?month=${record.month_period}&currency=${record.currency}`
-    },
-    monthly_invoice: {
+    } : null,
+    monthly_invoice: hasMonthlyInvoice ? {
       original_filename: record.monthly_invoice_original_filename,
       stored_filename: record.monthly_invoice_stored_filename,
       mime_type: record.monthly_invoice_mime_type,
       file_size: record.monthly_invoice_file_size,
       download_url: `/api/monthly-bank-statements/file/monthly_invoice?month=${record.month_period}&currency=${record.currency}`
-    },
+    } : null,
     uploaded_by: record.uploaded_by,
     uploaded_at: record.uploaded_at,
     updated_at: record.updated_at
@@ -93,6 +95,7 @@ router.get('/file/:type', authenticateTokenOrQuery, async (req, res) => {
     if (!record) return res.status(404).json({ success: false, error: 'No monthly bank statement record found for the given month and currency' });
 
     const filePath = fileType === 'bank_statement' ? record.bank_statement_file_path : record.monthly_invoice_file_path;
+    if (!filePath) return res.status(404).json({ success: false, error: 'No PDF uploaded for this type' });
     const downloadName = fileType === 'bank_statement'
       ? (record.bank_statement_original_filename || record.bank_statement_stored_filename)
       : (record.monthly_invoice_original_filename || record.monthly_invoice_stored_filename);
@@ -118,8 +121,7 @@ router.post(
   authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
   monthlyBankStatementUploadMiddleware,
   async (req, res) => {
-  let bankStatementFilePath;
-  let monthlyInvoiceFilePath;
+  let uploadedFilePath;
   try {
     const monthPeriod = normalizeMonth(req.body.month);
     const currency = normalizeCurrency(req.body.currency);
@@ -127,57 +129,55 @@ router.post(
     const monthlyInvoiceFile = req.files?.monthly_invoice?.[0];
     if (!monthPeriod) return res.status(400).json({ success: false, error: 'month is required in YYYY-MM format' });
     if (!VALID_CURRENCIES.has(currency)) return res.status(400).json({ success: false, error: 'currency must be one of AED, USD, GBP' });
-    if (!bankStatementFile || !monthlyInvoiceFile) {
-      return res.status(400).json({ success: false, error: 'Both PDF files are required (form-data keys: bank_statement, monthly_invoice)' });
+    if (!bankStatementFile && !monthlyInvoiceFile) {
+      return res.status(400).json({ success: false, error: 'Provide one PDF file using form-data key bank_statement or monthly_invoice' });
+    }
+    if (bankStatementFile && monthlyInvoiceFile) {
+      return res.status(400).json({ success: false, error: 'Upload only one file at a time: bank_statement or monthly_invoice' });
     }
 
     const currencyMonthDir = path.join(UPLOAD_DIR, currency, monthPeriod);
     await fs.promises.mkdir(currencyMonthDir, { recursive: true });
 
-    const bankOriginal = sanitizeFilename(bankStatementFile.originalname || 'bank-statement.pdf');
-    const invoiceOriginal = sanitizeFilename(monthlyInvoiceFile.originalname || 'monthly-invoice.pdf');
-    const bankStored = `${Date.now()}-bank-${bankOriginal}`;
-    const invoiceStored = `${Date.now()}-invoice-${invoiceOriginal}`;
-    bankStatementFilePath = path.join(currencyMonthDir, bankStored);
-    monthlyInvoiceFilePath = path.join(currencyMonthDir, invoiceStored);
-
-    await fs.promises.writeFile(bankStatementFilePath, bankStatementFile.buffer);
-    await fs.promises.writeFile(monthlyInvoiceFilePath, monthlyInvoiceFile.buffer);
-
     const previous = await MonthlyBankStatement.getOne({ monthPeriod, currency });
-    const saved = await MonthlyBankStatement.upsert({
+    const uploadType = bankStatementFile ? 'bank_statement' : 'monthly_invoice';
+    const selectedFile = bankStatementFile || monthlyInvoiceFile;
+    const originalName = sanitizeFilename(
+      selectedFile.originalname || (uploadType === 'bank_statement' ? 'bank-statement.pdf' : 'monthly-invoice.pdf')
+    );
+    const storedName = `${Date.now()}-${uploadType === 'bank_statement' ? 'bank' : 'invoice'}-${originalName}`;
+    uploadedFilePath = path.join(currencyMonthDir, storedName);
+
+    await fs.promises.writeFile(uploadedFilePath, selectedFile.buffer);
+
+    const saved = await MonthlyBankStatement.upsertSingleType({
       monthPeriod,
       currency,
-      bankStatement: {
-        originalFilename: bankOriginal,
-        storedFilename: bankStored,
-        filePath: bankStatementFilePath,
-        mimeType: bankStatementFile.mimetype || 'application/pdf',
-        fileSize: bankStatementFile.size || null
-      },
-      monthlyInvoice: {
-        originalFilename: invoiceOriginal,
-        storedFilename: invoiceStored,
-        filePath: monthlyInvoiceFilePath,
-        mimeType: monthlyInvoiceFile.mimetype || 'application/pdf',
-        fileSize: monthlyInvoiceFile.size || null
+      fileType: uploadType,
+      fileData: {
+        originalFilename: originalName,
+        storedFilename: storedName,
+        filePath: uploadedFilePath,
+        mimeType: selectedFile.mimetype || 'application/pdf',
+        fileSize: selectedFile.size || null
       },
       uploadedBy: req.user?.id || null
     });
 
     if (previous) {
-      if (previous.bank_statement_file_path && previous.bank_statement_file_path !== bankStatementFilePath) await removeFileIfExists(previous.bank_statement_file_path);
-      if (previous.monthly_invoice_file_path && previous.monthly_invoice_file_path !== monthlyInvoiceFilePath) await removeFileIfExists(previous.monthly_invoice_file_path);
+      const previousPath = uploadType === 'bank_statement'
+        ? previous.bank_statement_file_path
+        : previous.monthly_invoice_file_path;
+      if (previousPath && previousPath !== uploadedFilePath) await removeFileIfExists(previousPath);
     }
 
     return res.status(201).json({
       success: true,
-      message: 'Monthly bank statement and invoice uploaded successfully',
+      message: `${uploadType === 'bank_statement' ? 'Bank statement' : 'Monthly invoice'} uploaded successfully`,
       data: formatResponse(saved)
     });
   } catch (error) {
-    if (bankStatementFilePath) await removeFileIfExists(bankStatementFilePath);
-    if (monthlyInvoiceFilePath) await removeFileIfExists(monthlyInvoiceFilePath);
+    if (uploadedFilePath) await removeFileIfExists(uploadedFilePath);
     console.error('UPLOAD monthly bank statement error:', error);
     return res.status(500).json({ success: false, error: 'Failed to upload monthly bank statement PDFs' });
   }
@@ -191,16 +191,33 @@ router.delete(
   try {
     const monthPeriod = normalizeMonth(req.query.month);
     const currency = normalizeCurrency(req.query.currency);
+    const fileType = String(req.query.type || '').trim();
     if (!monthPeriod) return res.status(400).json({ success: false, error: 'month is required in YYYY-MM format' });
     if (!VALID_CURRENCIES.has(currency)) return res.status(400).json({ success: false, error: 'currency must be one of AED, USD, GBP' });
+    if (!VALID_FILE_TYPES.has(fileType)) return res.status(400).json({ success: false, error: 'type is required and must be bank_statement or monthly_invoice' });
 
     const current = await MonthlyBankStatement.getOne({ monthPeriod, currency });
     if (!current) return res.status(404).json({ success: false, error: 'No monthly bank statement record found for the given month and currency' });
+    const targetPath = fileType === 'bank_statement' ? current.bank_statement_file_path : current.monthly_invoice_file_path;
+    if (!targetPath) {
+      return res.status(404).json({
+        success: false,
+        error: `No ${fileType === 'bank_statement' ? 'bank statement' : 'monthly invoice'} found for the given month and currency`
+      });
+    }
 
-    await MonthlyBankStatement.clear({ monthPeriod, currency });
-    await removeFileIfExists(current.bank_statement_file_path);
-    await removeFileIfExists(current.monthly_invoice_file_path);
-    return res.json({ success: true, message: 'Monthly bank statement and invoice removed successfully' });
+    const updated = await MonthlyBankStatement.clearFileType({
+      monthPeriod,
+      currency,
+      fileType,
+      uploadedBy: req.user?.id || null
+    });
+    await removeFileIfExists(targetPath);
+    return res.json({
+      success: true,
+      message: `${fileType === 'bank_statement' ? 'Bank statement' : 'Monthly invoice'} removed successfully`,
+      data: formatResponse(updated)
+    });
   } catch (error) {
     console.error('DELETE monthly bank statement error:', error);
     return res.status(500).json({ success: false, error: 'Failed to delete monthly bank statement PDFs' });

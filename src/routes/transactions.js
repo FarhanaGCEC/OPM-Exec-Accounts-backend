@@ -47,6 +47,37 @@ function getBalanceCellBgColorByRemarks(remarks) {
   return normalized.includes('available balance') ? AVAILABLE_BALANCE_BG_COLOR : null;
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+/**
+ * Edit forms may send full remarks like "GCEC PDC, note text".
+ * Store only the latest free-text note in post_dated_cheques.description.
+ */
+function normalizePdcDescriptionInput(rawDescription, pdcType) {
+  if (rawDescription == null) return null;
+  const trimmed = String(rawDescription).trim();
+  if (!trimmed) return null;
+  const normalizedType = String(pdcType || '').trim().toLowerCase();
+  if (normalizedType && trimmed.toLowerCase() === normalizedType) {
+    return null;
+  }
+  const typePrefix = `${String(pdcType || '').trim()},`;
+  if (typePrefix !== ',' && trimmed.startsWith(typePrefix)) {
+    const withoutPrefix = trimmed.slice(typePrefix.length).trim();
+    return withoutPrefix || null;
+  }
+  return trimmed;
+}
+
+function buildPdcRemarks(pdcType, description) {
+  const desc = description == null ? '' : String(description).trim();
+  if (desc) return desc;
+  const typeText = pdcType == null ? '' : String(pdcType).trim();
+  return typeText || null;
+}
+
 /**
  * Daily transition PDC rows:
  * - all matured PDC (cheque_date <= today) for GCEC/Customer/Custom
@@ -97,26 +128,23 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
   const todayYmd = toYmd(new Date());
   const isUpcomingDailyTransitionPdc = rowDate > todayYmd;
-  const remarks =
-    pdc.description && String(pdc.description).trim()
-      ? `${pdc.pdc_type}, ${String(pdc.description).trim()}`
-      : pdc.pdc_type;
+  const remarks = buildPdcRemarks(pdc.pdc_type, pdc.description);
   const ledgerApprovalRequired = isGcec || isCustomerPdc;
   const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   const ledgerApproved = ledgerApprovalRequired
     ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
     : true;
   // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
-  // Customer PDC: show as debit until approved, then switch to credit.
-  const isCredit = (isGcec && rowDate > todayYmd) || (isCustomerPdc && ledgerApproved);
+  // Customer PDC: always show as credit in daily transactions.
+  const isCredit = (isGcec && rowDate > todayYmd) || isCustomerPdc;
   // Future-date transition row should not affect running balance directly.
   const includeInBalance = isUpcomingDailyTransitionPdc
     ? false
     : isCustomerPdc
-      ? true
+      ? ledgerApproved
       : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
-  const debitValue = includeInBalance && !isCredit ? formatAmount(pdc.amount) : null;
-  const creditValue = includeInBalance && isCredit ? formatAmount(pdc.amount) : null;
+  const debitValue = !isCredit ? formatAmount(pdc.amount) : null;
+  const creditValue = isCredit ? formatAmount(pdc.amount) : null;
   const pendingNoDateCredit =
     isUpcomingDailyTransitionPdc && isCredit ? formatAmount(pdc.amount) : null;
   const base = {
@@ -340,6 +368,7 @@ router.get('/all', authenticateToken, async (req, res) => {
         pdc.amount,
         pdc.cheque_type,
         pdc.pdc_type,
+        COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
         pdc.description,
         pdc.created_by,
         u.username as created_by_username,
@@ -348,24 +377,35 @@ router.get('/all', authenticateToken, async (req, res) => {
       FROM post_dated_cheques pdc
       LEFT JOIN users u ON pdc.created_by = u.id
       WHERE pdc.pdc_type = 'Customer PDC'
-        AND pdc.cheque_date > CURDATE()
+        AND (
+          pdc.cheque_date > CURDATE()
+          OR UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) = 'SECURITY CHEQUE'
+        )
       ${customerPdcDateFilter.whereClause ? `AND ${customerPdcDateFilter.whereClause}` : ''}
       ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
     `;
     const customerPdcResult = await pool.query(customerPdcQuery, customerPdcDateFilter.params);
-    const customerPdcs = customerPdcResult.rows.map(pdc => ({
-      id: pdc.id,
-      date: pdc.date,
-      transactionType: 'Customer PDC',
-      customerName: pdc.customer_name,
-      chequeNumber: pdc.cheque_number,
-      chequeType: pdc.cheque_type,
-      amount: formatAmount(pdc.amount),
-      description: pdc.description || null,
-      createdBy: pdc.created_by,
-      createdByUsername: pdc.created_by_username || null,
-      createdAt: pdc.created_at
-    }));
+    const customerPdcs = customerPdcResult.rows.map(pdc => {
+      const ledgerApproved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
+      return {
+        id: pdc.id,
+        date: pdc.date,
+        transactionType: 'Customer PDC',
+        customerName: pdc.customer_name,
+        chequeNumber: pdc.cheque_number,
+        chequeType: pdc.cheque_type,
+        debit: null,
+        credit: formatAmount(pdc.amount),
+        amount: formatAmount(pdc.amount),
+        description: pdc.description || null,
+        dailyLedgerApproved: ledgerApproved,
+        affectsBalance: ledgerApproved,
+        pendingBalanceEffect: !ledgerApproved,
+        createdBy: pdc.created_by,
+        createdByUsername: pdc.created_by_username || null,
+        createdAt: pdc.created_at
+      };
+    });
 
     // 4. Get Purchase Bills
     const purchaseBillDateFilter = buildDateFilter('pb.bill_date');
@@ -1398,7 +1438,15 @@ router.put(
         existingPdc.customer_name;
       const chequeType = body.chequeType ?? body.cheque_type ?? existingPdc.cheque_type;
       const pdcType = body.pdcType ?? body.pdc_type ?? existingPdc.pdc_type;
-      const description = body.description ?? body.description_text ?? existingPdc.description;
+      const descriptionInput =
+        hasOwn(body, 'description')
+          ? body.description
+          : hasOwn(body, 'description_text')
+            ? body.description_text
+            : hasOwn(body, 'remarks')
+              ? body.remarks
+              : existingPdc.description;
+      const description = normalizePdcDescriptionInput(descriptionInput, pdcType);
 
       if (!inputDate || !chequeNumber || !customerName || amountRaw == null || !chequeType || !pdcType) {
         return res.status(400).json({
@@ -1459,8 +1507,7 @@ router.put(
       const todayYmd = toYmd(new Date());
       const isCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
       const isGcec = isGcecPdcType(updatedPdc.pdc_type);
-      const ledgerApproved = parseDailyLedgerApproved(updatedPdc.daily_ledger_approved);
-      const isCredit = (isGcec && updatedPdc.cheque_date > todayYmd) || (isCustomerPdc && ledgerApproved);
+      const isCredit = (isGcec && updatedPdc.cheque_date > todayYmd) || isCustomerPdc;
 
       return res.json({
         success: true,
@@ -1474,9 +1521,7 @@ router.put(
           chequeNumber: updatedPdc.cheque_number || '-',
           debit: isCredit ? null : formatAmount(updatedPdc.amount),
           credit: isCredit ? formatAmount(updatedPdc.amount) : null,
-          remarks: updatedPdc.description
-            ? `${updatedPdc.pdc_type}, ${updatedPdc.description}`
-            : updatedPdc.pdc_type,
+          remarks: buildPdcRemarks(updatedPdc.pdc_type, updatedPdc.description),
           pdcType: updatedPdc.pdc_type
         }
       });

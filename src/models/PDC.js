@@ -57,7 +57,13 @@ class PDC {
           pdc.updated_at
         FROM post_dated_cheques pdc
         LEFT JOIN users u ON pdc.created_by = u.id
-        WHERE pdc.cheque_date > CURDATE()
+        WHERE (
+          pdc.cheque_date > CURDATE()
+          OR (
+            pdc.pdc_type = 'Customer PDC'
+            AND UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) = 'SECURITY CHEQUE'
+          )
+        )
         ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
       `);
       return result.rows.map(row => this.formatDates(row));
