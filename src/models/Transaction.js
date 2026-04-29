@@ -126,7 +126,8 @@ SET t.balance = x.running_bal
           t.remarks,
           t.created_by,
           u.username as created_by_username,
-          t.created_at
+          t.created_at,
+          DATE_FORMAT(CONVERT_TZ(t.created_at, '+00:00', '+04:00'), '%Y-%m-%d %H:%i:%s') AS created_at_local
         FROM transactions t
         LEFT JOIN payables_categories pc ON t.category_id = pc.id AND t.category_type = 'payable'
         LEFT JOIN receivables_categories rc ON t.category_id = rc.id AND t.category_type = 'receivable'
@@ -157,7 +158,8 @@ SET t.balance = x.running_bal
           t.remarks,
           t.created_by,
           u.username as created_by_username,
-          t.created_at
+          t.created_at,
+          DATE_FORMAT(CONVERT_TZ(t.created_at, '+00:00', '+04:00'), '%Y-%m-%d %H:%i:%s') AS created_at_local
         FROM transactions t
         LEFT JOIN payables_categories pc ON t.category_id = pc.id AND t.category_type = 'payable'
         LEFT JOIN receivables_categories rc ON t.category_id = rc.id AND t.category_type = 'receivable'
@@ -322,7 +324,9 @@ SET t.balance = x.running_bal
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        `SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at,
+                DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+04:00'), '%Y-%m-%d %H:%i:%s') AS created_at_local
+         FROM transactions WHERE id = ?`,
         [insertedId]
       );
       const transaction = fetchResult.rows[0];
@@ -627,7 +631,9 @@ SET t.balance = x.running_bal
 
       // Fetch updated transaction
       const fetchResult = await pool.query(
-        'SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        `SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at,
+                DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+04:00'), '%Y-%m-%d %H:%i:%s') AS created_at_local
+         FROM transactions WHERE id = ?`,
         [id]
       );
       const updatedTransaction = fetchResult.rows[0];
