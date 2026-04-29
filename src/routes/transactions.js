@@ -41,48 +41,6 @@ function toYmd(d) {
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
 }
 
-function toDubaiDateTimeString(value) {
-  if (value == null || value === '') return null;
-  const dt = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(dt.getTime())) return null;
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Dubai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(dt);
-  const pick = (type) => parts.find((p) => p.type === type)?.value || '';
-  const day = pick('day');
-  const month = pick('month');
-  const year = pick('year');
-  const hour = pick('hour');
-  const minute = pick('minute');
-  const second = pick('second');
-  if (!year || !month || !day || !hour || !minute || !second) return null;
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
-}
-
-function buildDubaiTransitionCreatedAt(dateYmd, sourceCreatedAt, { useActualCreatedAt = false } = {}) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateYmd || ''))) {
-    return { createdAt: null, createdAtLocal: null };
-  }
-  if (useActualCreatedAt && sourceCreatedAt) {
-    const actual = sourceCreatedAt instanceof Date ? sourceCreatedAt.toISOString() : String(sourceCreatedAt);
-    return {
-      createdAt: actual,
-      createdAtLocal: toDubaiDateTimeString(sourceCreatedAt)
-    };
-  }
-  // Synthetic daily-transition PDC rows represent roll-over at 12:01 AM Dubai time.
-  const local = `${dateYmd} 00:01:00`;
-  const utcIso = new Date(`${dateYmd}T00:01:00+04:00`).toISOString();
-  return { createdAt: utcIso, createdAtLocal: local };
-}
-
 function getBalanceCellBgColorByRemarks(remarks) {
   const normalized = (remarks == null ? '' : String(remarks)).trim().toLowerCase();
   if (!normalized) return null;
@@ -120,13 +78,6 @@ function buildPdcRemarks(pdcType, description) {
   return typeText || null;
 }
 
-function resolveDailyPdcRemarks({ pdcType, description, isCustomerPdc, ledgerApproved }) {
-  const desc = description == null ? '' : String(description).trim();
-  // For approved Customer PDC, allow empty remarks (null) so users can keep it blank.
-  if (isCustomerPdc && ledgerApproved && !desc) return null;
-  return buildPdcRemarks(pdcType, description);
-}
-
 /**
  * Daily transition PDC rows:
  * - all matured PDC (cheque_date <= today) for GCEC/Customer/Custom
@@ -160,8 +111,7 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
       pdc.description,
       pdc.created_by,
       u.username AS created_by_username,
-      pdc.created_at,
-      pdc.updated_at
+      pdc.created_at
     FROM post_dated_cheques pdc
     LEFT JOIN users u ON pdc.created_by = u.id
     WHERE ${conditions.join(' AND ')}
@@ -178,17 +128,12 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
   const todayYmd = toYmd(new Date());
   const isUpcomingDailyTransitionPdc = rowDate > todayYmd;
+  const remarks = buildPdcRemarks(pdc.pdc_type, pdc.description);
   const ledgerApprovalRequired = isGcec || isCustomerPdc;
+  const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   const ledgerApproved = ledgerApprovalRequired
     ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
     : true;
-  const remarks = resolveDailyPdcRemarks({
-    pdcType: pdc.pdc_type,
-    description: pdc.description,
-    isCustomerPdc,
-    ledgerApproved
-  });
-  const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
   // Customer PDC: always show as credit in daily transactions.
   const isCredit = (isGcec && rowDate > todayYmd) || isCustomerPdc;
@@ -202,10 +147,6 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const creditValue = isCredit ? formatAmount(pdc.amount) : null;
   const pendingNoDateCredit =
     isUpcomingDailyTransitionPdc && isCredit ? formatAmount(pdc.amount) : null;
-  const syntheticTransitionTime = buildDubaiTransitionCreatedAt(rowDate, pdc.created_at, {
-    useActualCreatedAt: rowDate === todayYmd
-  });
-  const approvedAt = ledgerApproved ? pdc.updated_at || null : null;
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
@@ -219,12 +160,8 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     balanceCellBgColor: getBalanceCellBgColorByRemarks(remarks),
     createdBy: pdc.created_by,
     createdByUsername: pdc.created_by_username || null,
-    createdAt: syntheticTransitionTime.createdAt,
-    createdAtLocal: syntheticTransitionTime.createdAtLocal,
-    approvedAt,
-    approvedAtLocal: toDubaiDateTimeString(approvedAt),
+    createdAt: pdc.created_at,
     pdcId: pdc.id,
-    sequence: Number(pdc.id),
     pdcType: pdc.pdc_type,
     isUpcomingDailyTransitionPdc,
     syntheticFromPdc: true,
@@ -343,7 +280,6 @@ router.get('/all', authenticateToken, async (req, res) => {
         t.created_by,
         u.username as created_by_username,
         t.created_at,
-        DATE_FORMAT(CONVERT_TZ(t.created_at, '+00:00', '+04:00'), '%Y-%m-%d %H:%i:%s') AS created_at_local,
         'Daily Transaction' as transaction_type
       FROM transactions t
       LEFT JOIN payables_categories pc ON t.category_id = pc.id AND t.category_type = 'payable'
@@ -366,8 +302,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
-      createdAt: txn.created_at,
-      createdAtLocal: txn.created_at_local || toDubaiDateTimeString(txn.created_at)
+      createdAt: txn.created_at
     }));
 
     // PDCs whose cheque date has arrived: Daily Transaction rows dated as cheque_date (same range as filters when set)
@@ -419,8 +354,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       description: pdc.description || null,
       createdBy: pdc.created_by,
       createdByUsername: pdc.created_by_username || null,
-      createdAt: pdc.created_at,
-      createdAtLocal: toDubaiDateTimeString(pdc.created_at)
+      createdAt: pdc.created_at
     }));
 
     // 3. Get Customer PDC
@@ -439,7 +373,6 @@ router.get('/all', authenticateToken, async (req, res) => {
         pdc.created_by,
         u.username as created_by_username,
         pdc.created_at,
-        pdc.updated_at,
         'Customer PDC' as transaction_type
       FROM post_dated_cheques pdc
       LEFT JOIN users u ON pdc.created_by = u.id
@@ -470,9 +403,7 @@ router.get('/all', authenticateToken, async (req, res) => {
         pendingBalanceEffect: !ledgerApproved,
         createdBy: pdc.created_by,
         createdByUsername: pdc.created_by_username || null,
-        createdAt: pdc.created_at,
-        approvedAt: ledgerApproved ? pdc.updated_at : null,
-        createdAtLocal: toDubaiDateTimeString(pdc.created_at)
+        createdAt: pdc.created_at
       };
     });
 
@@ -513,8 +444,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       paymentStatus: bill.payment_status || null,
       createdBy: bill.created_by,
       createdByUsername: bill.created_by_username || null,
-      createdAt: bill.created_at,
-      createdAtLocal: toDubaiDateTimeString(bill.created_at)
+      createdAt: bill.created_at
     }));
 
     const allTransactions = [
@@ -523,39 +453,13 @@ router.get('/all', authenticateToken, async (req, res) => {
       ...customerPdcs,
       ...purchaseBills
     ];
-    const dailyRowOrderById = new Map(
-      dailyTransactions.map((row, index) => [String(row.id), index])
-    );
     const orderedAllTransactions = [...allTransactions].sort((a, b) => {
-      const typeRank = (row) => {
-        if (row.transactionType === 'Daily Transaction') return 0;
-        if (row.transactionType === 'Customer PDC') return 1;
-        return 2;
-      };
-      const aTypeRank = typeRank(a);
-      const bTypeRank = typeRank(b);
-      if (aTypeRank !== bTypeRank) return aTypeRank - bTypeRank;
-      if (a.transactionType === 'Daily Transaction' && b.transactionType === 'Daily Transaction') {
-        const aIndex = dailyRowOrderById.get(String(a.id));
-        const bIndex = dailyRowOrderById.get(String(b.id));
-        if (aIndex != null && bIndex != null && aIndex !== bIndex) return aIndex - bIndex;
-      }
       const da = toYmd(a.date);
       const db = toYmd(b.date);
       if (da !== db) return da.localeCompare(db);
-      const bothApprovedCustomerPdc =
-        a.transactionType === 'Customer PDC' &&
-        b.transactionType === 'Customer PDC' &&
-        a.dailyLedgerApproved === true &&
-        b.dailyLedgerApproved === true;
-      if (bothApprovedCustomerPdc) {
-        const aApproved = a.approvedAt ? new Date(a.approvedAt).getTime() : 0;
-        const bApproved = b.approvedAt ? new Date(b.approvedAt).getTime() : 0;
-        if (aApproved !== bApproved) return aApproved - bApproved;
-      }
       const aCreated = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const bCreated = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (aCreated !== bCreated) return bCreated - aCreated;
+      if (aCreated !== bCreated) return aCreated - bCreated;
       return String(a.id).localeCompare(String(b.id));
     });
 
@@ -614,24 +518,14 @@ router.get('/', authenticateToken, async (req, res) => {
       balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
-      createdAt: txn.created_at,
-      createdAtLocal: txn.created_at_local || toDubaiDateTimeString(txn.created_at)
+      createdAt: txn.created_at
     }));
 
     const pdcRows = await fetchPdcRowsMaturedForDailyLedger();
     const synthetic = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
     const rowsForRunningBalance = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
     await applyRunningBalancesToMainRows(rowsForRunningBalance);
-    const displayOrderedTransactions = [...rowsForRunningBalance].sort((a, b) => {
-      const da = toYmd(a.date);
-      const db = toYmd(b.date);
-      if (da !== db) return da.localeCompare(db);
-      const aCreated = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bCreated = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (aCreated !== bCreated) return aCreated - bCreated;
-      return String(a.id).localeCompare(String(b.id));
-    });
-    formattedTransactions = displayOrderedTransactions;
+    formattedTransactions = rowsForRunningBalance;
 
     const lastDailyRowWithBalance = [...rowsForRunningBalance]
       .reverse()
@@ -904,8 +798,7 @@ function formatCreatedTransactionRow(transaction) {
     createdBy:
       transaction.created_by != null ? jsonSafeInt(transaction.created_by) : null,
     createdByUsername: transaction.created_by_username,
-    createdAt,
-    createdAtLocal: transaction.created_at_local || toDubaiDateTimeString(createdAt)
+    createdAt
   };
 }
 
@@ -1410,8 +1303,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
         balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
-        createdAt: transaction.created_at,
-        createdAtLocal: transaction.created_at_local || toDubaiDateTimeString(transaction.created_at)
+        createdAt: transaction.created_at
       }
     });
   } catch (error) {
@@ -1615,7 +1507,6 @@ router.put(
       const todayYmd = toYmd(new Date());
       const isCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
       const isGcec = isGcecPdcType(updatedPdc.pdc_type);
-      const ledgerApproved = parseDailyLedgerApproved(updatedPdc.daily_ledger_approved);
       const isCredit = (isGcec && updatedPdc.cheque_date > todayYmd) || isCustomerPdc;
 
       return res.json({
@@ -1630,12 +1521,7 @@ router.put(
           chequeNumber: updatedPdc.cheque_number || '-',
           debit: isCredit ? null : formatAmount(updatedPdc.amount),
           credit: isCredit ? formatAmount(updatedPdc.amount) : null,
-          remarks: resolveDailyPdcRemarks({
-            pdcType: updatedPdc.pdc_type,
-            description: updatedPdc.description,
-            isCustomerPdc,
-            ledgerApproved
-          }),
+          remarks: buildPdcRemarks(updatedPdc.pdc_type, updatedPdc.description),
           pdcType: updatedPdc.pdc_type
         }
       });
@@ -1725,8 +1611,7 @@ router.put(
         balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
-        createdAt: transaction.created_at,
-        createdAtLocal: transaction.created_at_local || toDubaiDateTimeString(transaction.created_at)
+        createdAt: transaction.created_at
       }
     });
   } catch (error) {
