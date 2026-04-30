@@ -14,7 +14,7 @@ const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
 } = require('../utils/attachmentPayload');
-const { USER_ROLES } = require('../constants/roles');
+const { USER_ROLES, isElevatedUserRole } = require('../constants/roles');
 const {
   normalizeStatementAmount,
   parseStatementDateInput,
@@ -413,9 +413,17 @@ class StatementController {
   //   - Frontend format: total_payment_due, paid, epp
   static async updateStatement(req, res) {
     try {
-      if (req.user && req.user.role === USER_ROLES.USER) {
-        const { queueStatementFieldChange } = require('./statementChangeRequestQueue');
-        return queueStatementFieldChange(req, res);
+      const role = req.user && req.user.role;
+      if (!isElevatedUserRole(role)) {
+        if (role === USER_ROLES.USER) {
+          const { queueStatementFieldChange } = require('./statementChangeRequestQueue');
+          return queueStatementFieldChange(req, res);
+        }
+        return res.status(403).json({
+          success: false,
+          error: 'Your role has read-only access and cannot update statements.',
+          code: 'FORBIDDEN_ROLE'
+        });
       }
 
       const { id } = req.params;
@@ -858,12 +866,15 @@ class StatementController {
    */
   static async uploadStatementAttachment(req, res) {
     try {
-      if (req.user && req.user.role === USER_ROLES.USER) {
+      const role = req.user && req.user.role;
+      if (!isElevatedUserRole(role)) {
         return res.status(400).json({
           success: false,
-          code: 'APPROVAL_REQUIRED',
+          code: role === USER_ROLES.USER ? 'APPROVAL_REQUIRED' : 'FORBIDDEN_ROLE',
           error:
-            'Standard users cannot attach a PDF directly. Ask an admin to attach the file, or submit amount/date changes via PATCH /api/statements/:id (those are queued for approval automatically).',
+            role === USER_ROLES.USER
+              ? 'Standard users cannot attach a PDF directly. Ask an admin to attach the file, or submit amount/date changes via PATCH /api/statements/:id (those are queued for approval automatically).'
+              : 'Your role has read-only access and cannot attach statement PDFs.',
         });
       }
 
@@ -1024,9 +1035,17 @@ class StatementController {
    */
   static async deleteStatementAttachment(req, res) {
     try {
-      if (req.user && req.user.role === USER_ROLES.USER) {
-        const { queueStatementAttachmentRemoval } = require('./statementChangeRequestQueue');
-        return queueStatementAttachmentRemoval(req, res);
+      const role = req.user && req.user.role;
+      if (!isElevatedUserRole(role)) {
+        if (role === USER_ROLES.USER) {
+          const { queueStatementAttachmentRemoval } = require('./statementChangeRequestQueue');
+          return queueStatementAttachmentRemoval(req, res);
+        }
+        return res.status(403).json({
+          success: false,
+          error: 'Your role has read-only access and cannot delete statement attachments.',
+          code: 'FORBIDDEN_ROLE'
+        });
       }
 
       const { id } = req.params;

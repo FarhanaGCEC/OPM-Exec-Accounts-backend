@@ -31,6 +31,12 @@ class PDC {
     if (Object.prototype.hasOwnProperty.call(pdc, 'daily_ledger_approved')) {
       formatted.daily_ledger_approved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
     }
+    if (pdc.daily_ledger_approved_at) {
+      formatted.daily_ledger_approved_at =
+        pdc.daily_ledger_approved_at instanceof Date
+          ? pdc.daily_ledger_approved_at.toISOString()
+          : pdc.daily_ledger_approved_at;
+    }
     return formatted;
   }
 
@@ -48,6 +54,7 @@ class PDC {
           pdc.pdc_type,
           pdc.description,
           pdc.daily_ledger_approved,
+          pdc.daily_ledger_approved_at,
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,
@@ -86,6 +93,7 @@ class PDC {
           pdc.pdc_type,
           pdc.description,
           pdc.daily_ledger_approved,
+          pdc.daily_ledger_approved_at,
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,
@@ -130,7 +138,7 @@ class PDC {
       );
       const fetchResult = await pool.query(
         `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
-          daily_ledger_approved, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
           FROM post_dated_cheques WHERE id = LAST_INSERT_ID()`
       );
 
@@ -184,7 +192,7 @@ class PDC {
 
       const fetchResult = await pool.query(
         `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
-          daily_ledger_approved, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
           FROM post_dated_cheques WHERE id = ?`,
         [id]
       );
@@ -217,9 +225,14 @@ class PDC {
       const v = approved ? 1 : 0;
       const updateResult = await pool.query(
         `UPDATE post_dated_cheques 
-         SET daily_ledger_approved = ?, updated_at = CURRENT_TIMESTAMP 
+         SET daily_ledger_approved = ?,
+             daily_ledger_approved_at = CASE
+               WHEN ? = 1 AND daily_ledger_approved_at IS NULL THEN CURRENT_TIMESTAMP
+               ELSE daily_ledger_approved_at
+             END,
+             updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [v, id]
+        [v, v, id]
       );
       if (updateResult.affectedRows === 0) {
         return null;
@@ -282,6 +295,7 @@ class PDC {
           pdc.pdc_type,
           pdc.description,
           pdc.daily_ledger_approved,
+          pdc.daily_ledger_approved_at,
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,

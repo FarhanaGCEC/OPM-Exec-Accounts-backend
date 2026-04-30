@@ -99,7 +99,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 });
 
 // Create a new credit card payment
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateToken, requireElevatedForMutation, async (req, res) => {
   try {
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
 

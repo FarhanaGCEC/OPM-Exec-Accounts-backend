@@ -394,6 +394,7 @@ const initDatabase = async () => {
         pdc_type VARCHAR(50) NOT NULL,
         description TEXT,
         daily_ledger_approved TINYINT(1) NOT NULL DEFAULT 0,
+        daily_ledger_approved_at TIMESTAMP NULL,
         attachment_name VARCHAR(512) NULL,
         attachment_url TEXT NULL,
         attachment_cloudinary_public_id VARCHAR(512) NULL,
@@ -423,6 +424,11 @@ const initDatabase = async () => {
       if (!(await columnExists('post_dated_cheques', 'daily_ledger_approved'))) {
         await pool.query(
           'ALTER TABLE post_dated_cheques ADD COLUMN daily_ledger_approved TINYINT(1) NOT NULL DEFAULT 0'
+        );
+      }
+      if (!(await columnExists('post_dated_cheques', 'daily_ledger_approved_at'))) {
+        await pool.query(
+          'ALTER TABLE post_dated_cheques ADD COLUMN daily_ledger_approved_at TIMESTAMP NULL'
         );
       }
     }

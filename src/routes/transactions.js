@@ -71,11 +71,36 @@ function normalizePdcDescriptionInput(rawDescription, pdcType) {
   return trimmed;
 }
 
-function buildPdcRemarks(pdcType, description) {
+function buildPdcRemarks(pdcType, description, { hideTypeFallback = false } = {}) {
   const desc = description == null ? '' : String(description).trim();
   if (desc) return desc;
+  if (hideTypeFallback) return null;
   const typeText = pdcType == null ? '' : String(pdcType).trim();
   return typeText || null;
+}
+
+function getOrderTimestampMs(row) {
+  if (!row) return 0;
+  const isApprovedCustomerPdc =
+    (row.transactionType === 'Customer PDC' || isCustomerPdcType(row.pdcType)) &&
+    row.dailyLedgerApproved === true &&
+    row.dailyLedgerApprovedAt;
+  const primary = isApprovedCustomerPdc ? row.dailyLedgerApprovedAt : row.createdAt;
+  const ms = primary ? new Date(primary).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function formatTimestampForDisplay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
 }
 
 /**
@@ -103,6 +128,7 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
       pdc.id,
       DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') AS cheque_date_ymd,
       COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
+      pdc.daily_ledger_approved_at,
       pdc.cheque_number,
       pdc.customer_name,
       pdc.amount,
@@ -128,12 +154,15 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
   const todayYmd = toYmd(new Date());
   const isUpcomingDailyTransitionPdc = rowDate > todayYmd;
-  const remarks = buildPdcRemarks(pdc.pdc_type, pdc.description);
   const ledgerApprovalRequired = isGcec || isCustomerPdc;
   const approvalRelevantNow = ledgerApprovalRequired && !isUpcomingDailyTransitionPdc;
   const ledgerApproved = ledgerApprovalRequired
     ? parseDailyLedgerApproved(pdc.daily_ledger_approved)
     : true;
+  // Approved Customer PDC should look like a regular transaction row:
+  // use only free-text description and do not fallback to "Customer PDC" label.
+  const hideTypeFallback = isCustomerPdc && ledgerApproved;
+  const remarks = buildPdcRemarks(pdc.pdc_type, pdc.description, { hideTypeFallback });
   // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
   // Customer PDC: always show as credit in daily transactions.
   const isCredit = (isGcec && rowDate > todayYmd) || isCustomerPdc;
@@ -161,6 +190,8 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     createdBy: pdc.created_by,
     createdByUsername: pdc.created_by_username || null,
     createdAt: pdc.created_at,
+    dailyLedgerApprovedAt: pdc.daily_ledger_approved_at || null,
+    dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(pdc.daily_ledger_approved_at),
     pdcId: pdc.id,
     pdcType: pdc.pdc_type,
     isUpcomingDailyTransitionPdc,
@@ -190,6 +221,9 @@ function sortMergedByDateThenId(rows) {
     const da = toYmd(a.date);
     const db = toYmd(b.date);
     if (da !== db) return da.localeCompare(db);
+    const aOrderMs = getOrderTimestampMs(a);
+    const bOrderMs = getOrderTimestampMs(b);
+    if (aOrderMs !== bOrderMs) return aOrderMs - bOrderMs;
     const ida = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
     const idb = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
     if (ida !== idb) return ida - idb;
@@ -369,6 +403,7 @@ router.get('/all', authenticateToken, async (req, res) => {
         pdc.cheque_type,
         pdc.pdc_type,
         COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
+        pdc.daily_ledger_approved_at,
         pdc.description,
         pdc.created_by,
         u.username as created_by_username,
@@ -399,6 +434,7 @@ router.get('/all', authenticateToken, async (req, res) => {
         amount: formatAmount(pdc.amount),
         description: pdc.description || null,
         dailyLedgerApproved: ledgerApproved,
+        dailyLedgerApprovedAt: pdc.daily_ledger_approved_at || null,
         affectsBalance: ledgerApproved,
         pendingBalanceEffect: !ledgerApproved,
         createdBy: pdc.created_by,
@@ -457,8 +493,8 @@ router.get('/all', authenticateToken, async (req, res) => {
       const da = toYmd(a.date);
       const db = toYmd(b.date);
       if (da !== db) return da.localeCompare(db);
-      const aCreated = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bCreated = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      const aCreated = getOrderTimestampMs(a);
+      const bCreated = getOrderTimestampMs(b);
       if (aCreated !== bCreated) return aCreated - bCreated;
       return String(a.id).localeCompare(String(b.id));
     });
@@ -1521,7 +1557,9 @@ router.put(
           chequeNumber: updatedPdc.cheque_number || '-',
           debit: isCredit ? null : formatAmount(updatedPdc.amount),
           credit: isCredit ? formatAmount(updatedPdc.amount) : null,
-          remarks: buildPdcRemarks(updatedPdc.pdc_type, updatedPdc.description),
+          remarks: buildPdcRemarks(updatedPdc.pdc_type, updatedPdc.description, {
+            hideTypeFallback: isCustomerPdc && parseDailyLedgerApproved(updatedPdc.daily_ledger_approved)
+          }),
           pdcType: updatedPdc.pdc_type
         }
       });

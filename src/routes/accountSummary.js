@@ -91,24 +91,6 @@ router.get('/', authenticateToken, async (req, res) => {
       ? formatAmount(balanceResult.rows[0].balance)
       : "0.00";
 
-    // Get total credit up to selected date
-    const creditResult = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total
-       FROM transactions
-       WHERE type = 'Credit' AND date <= ?`,
-      [asOfDate]
-    );
-    const totalCredit = formatAmount(creditResult.rows[0].total);
-
-    // Get total debit up to selected date
-    const debitResult = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total
-       FROM transactions
-       WHERE type = 'Debit' AND date <= ?`,
-      [asOfDate]
-    );
-    const totalDebit = formatAmount(debitResult.rows[0].total);
-
     // Get pending checks after selected date (future PDCs)
     const pendingChecksResult = await pool.query(
       `SELECT 
@@ -209,6 +191,20 @@ router.get('/', authenticateToken, async (req, res) => {
       latestBalanceAsOfDateRows.length > 0
         ? formatAmount(latestBalanceAsOfDateRows[latestBalanceAsOfDateRows.length - 1].balance)
         : baseTotalBalance;
+    const totalsAsOfDateRows = rowsForRunningBalance.filter((row) => {
+      const txnDate = toYmd(row.date);
+      return txnDate <= asOfDate && row.affectsBalance !== false;
+    });
+    let totalCreditAmount = 0;
+    let totalDebitAmount = 0;
+    for (const row of totalsAsOfDateRows) {
+      const debitAmt = row.debit != null ? Number(row.debit) : 0;
+      const creditAmt = row.credit != null ? Number(row.credit) : 0;
+      if (!Number.isNaN(debitAmt) && debitAmt > 0) totalDebitAmount += debitAmt;
+      if (!Number.isNaN(creditAmt) && creditAmt > 0) totalCreditAmount += creditAmt;
+    }
+    const totalCredit = formatAmount(totalCreditAmount);
+    const totalDebit = formatAmount(totalDebitAmount);
 
     const availableBalanceRows = rowsForRunningBalance.filter((row) => {
       const remarks = String(row.remarks || '').trim().toLowerCase();

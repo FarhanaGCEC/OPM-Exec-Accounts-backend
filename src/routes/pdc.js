@@ -21,6 +21,19 @@ const PDC_IMAGE_FILENAME_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif'
 
 const router = express.Router();
 
+function formatTimestampForDisplay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+}
+
 function formatPdcForApi(pdc) {
   if (!pdc) return pdc;
   const attachment = buildPdcAttachmentPayload(pdc);
@@ -29,6 +42,7 @@ function formatPdcForApi(pdc) {
     attachment_url,
     attachment_cloudinary_public_id,
     daily_ledger_approved,
+    daily_ledger_approved_at,
     ...rest
   } = pdc;
   const approvalType = isGcecPdcType(pdc.pdc_type) || isCustomerPdcType(pdc.pdc_type);
@@ -38,6 +52,8 @@ function formatPdcForApi(pdc) {
     amount: formatAmount(pdc.amount),
     attachment,
     dailyLedgerApproved: ledgerOk,
+    dailyLedgerApprovedAt: daily_ledger_approved_at || null,
+    dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(daily_ledger_approved_at),
     pendingGcecLedgerApproval: approvalType && !ledgerOk
   };
   if (out.days_remaining !== undefined) {

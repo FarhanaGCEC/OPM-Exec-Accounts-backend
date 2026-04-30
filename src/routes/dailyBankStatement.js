@@ -117,10 +117,17 @@ router.get('/file', authenticateTokenOrQuery, async (_req, res) => {
     }
 
     await fs.promises.access(absolutePath, fs.constants.F_OK);
-    const viewName = current.original_filename || current.stored_filename || 'daily-bank-statement.pdf';
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
-    return res.sendFile(absolutePath);
+    const downloadName = current.original_filename || current.stored_filename || 'daily-bank-statement.pdf';
+    return res.download(absolutePath, downloadName, (err) => {
+      if (err && !res.headersSent) {
+        console.error('Error sending daily bank statement PDF:', err.message);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to download daily bank statement PDF'
+        });
+      }
+      return null;
+    });
   } catch (error) {
     if (error.code === 'ENOENT') {
       return res.status(404).json({
