@@ -5,12 +5,25 @@ const roundToTwoDecimals = (value) => {
   return Math.round(parseFloat(value) * 100) / 100;
 };
 
+const normalizeTransactionTime = (value) => {
+  if (value == null || String(value).trim() === '') return '00:00:00';
+  const raw = String(value).trim();
+  const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
+  if (!match) {
+    throw new Error('transactionTime must be in HH:mm or HH:mm:ss format');
+  }
+  const hh = match[1].padStart(2, '0');
+  const mm = match[2];
+  const ss = match[3] || '00';
+  return `${hh}:${mm}:${ss}`;
+};
+
 class Transaction {
   // Get the latest balance (by date, then by id for same date)
   static async getLatestBalance() {
     try {
       const result = await pool.query(
-        'SELECT balance FROM transactions ORDER BY date DESC, id DESC LIMIT 1'
+        'SELECT balance FROM transactions ORDER BY date DESC, transaction_time DESC, id DESC LIMIT 1'
       );
       return result.rows.length > 0 ? parseFloat(result.rows[0].balance) : 0;
     } catch (error) {
@@ -24,7 +37,7 @@ class Transaction {
       const result = await pool.query(
         `SELECT balance FROM transactions 
          WHERE date < ?
-         ORDER BY date DESC, id DESC LIMIT 1`,
+         ORDER BY date DESC, transaction_time DESC, id DESC LIMIT 1`,
         [date]
       );
       return result.rows.length > 0 ? parseFloat(result.rows[0].balance) : 0;
@@ -51,7 +64,7 @@ INNER JOIN (
           ELSE 0
         END
       ) OVER (
-        ORDER BY \`date\` ASC, id ASC
+        ORDER BY \`date\` ASC, transaction_time ASC, id ASC
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
       ),
       2
@@ -61,7 +74,7 @@ INNER JOIN (
 SET t.balance = x.running_bal
       `);
       const tail = await queryFn(
-        'SELECT balance FROM transactions ORDER BY `date` DESC, id DESC LIMIT 1'
+        'SELECT balance FROM transactions ORDER BY `date` DESC, transaction_time DESC, id DESC LIMIT 1'
       );
       if (tail.rows.length === 0) {
         return 0;
@@ -75,7 +88,7 @@ SET t.balance = x.running_bal
     }
 
     const result = await queryFn(
-      'SELECT id, type, amount FROM transactions ORDER BY date ASC, id ASC'
+      'SELECT id, type, amount FROM transactions ORDER BY date ASC, transaction_time ASC, id ASC'
     );
 
     let runningBalance = 0;
@@ -115,6 +128,7 @@ SET t.balance = x.running_bal
         SELECT 
           t.id,
           t.date,
+          t.transaction_time,
           t.type,
           t.category_id,
           t.category_type,
@@ -131,7 +145,7 @@ SET t.balance = x.running_bal
         LEFT JOIN payables_categories pc ON t.category_id = pc.id AND t.category_type = 'payable'
         LEFT JOIN receivables_categories rc ON t.category_id = rc.id AND t.category_type = 'receivable'
         LEFT JOIN users u ON t.created_by = u.id
-        ORDER BY t.date ASC, t.id ASC
+        ORDER BY t.date ASC, t.transaction_time ASC, t.id ASC
       `);
       return result.rows;
     } catch (error) {
@@ -146,6 +160,7 @@ SET t.balance = x.running_bal
         SELECT 
           t.id,
           t.date,
+          t.transaction_time,
           t.type,
           t.category_id,
           t.category_type,
@@ -178,7 +193,18 @@ SET t.balance = x.running_bal
   // Create a new transaction and calculate balance
   static async create(transactionData) {
     try {
-      const { date, type, categoryId, paymentType, chequeNumber, amount, remarks, createdBy } = transactionData;
+      const {
+        date,
+        transactionTime,
+        type,
+        categoryId,
+        paymentType,
+        chequeNumber,
+        amount,
+        remarks,
+        createdBy
+      } = transactionData;
+      const normalizedTransactionTime = normalizeTransactionTime(transactionTime);
       
       // Round amount to 2 decimal places
       const roundedAmount = roundToTwoDecimals(amount);
@@ -205,66 +231,21 @@ SET t.balance = x.running_bal
         }
       }
 
-      // Get balance before this transaction's date (chronologically)
-      // First, get balance from transactions before this date
-      const balanceBeforeDate = await pool.query(
-        `SELECT balance FROM transactions 
-         WHERE date < ?
-         ORDER BY date DESC, id DESC LIMIT 1`,
-        [date]
-      );
-
-      let previousBalance = 0;
-      if (balanceBeforeDate.rows.length > 0) {
-        previousBalance = parseFloat(balanceBeforeDate.rows[0].balance);
-      }
-
-      // If there are transactions on the same date, get the last one's balance
-      const sameDateTransactions = await pool.query(
-        `SELECT balance, type, amount FROM transactions 
-         WHERE date = ?
-         ORDER BY id DESC`,
-        [date]
-      );
-
-      // Calculate running balance for same-date transactions
-      let runningBalance = previousBalance;
-      for (const txn of sameDateTransactions.rows) {
-        if (txn.type === 'Debit') {
-          runningBalance = runningBalance - parseFloat(txn.amount);
-        } else {
-          runningBalance = runningBalance + parseFloat(txn.amount);
-        }
-        // Round balance to 2 decimal places
-        runningBalance = roundToTwoDecimals(runningBalance);
-      }
-
-      // Now calculate balance for the new transaction
-      let newBalance;
-      if (type === 'Debit') {
-        newBalance = runningBalance - roundedAmount;
-      } else if (type === 'Credit') {
-        newBalance = runningBalance + roundedAmount;
-      } else {
-        throw new Error('Invalid transaction type. Must be "Debit" or "Credit"');
-      }
-      // Round balance to 2 decimal places
-      newBalance = roundToTwoDecimals(newBalance);
-
       // Insert transaction
-      const result = await pool.query(
+      await pool.query(
         `INSERT INTO transactions 
-         (date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           date,
+          normalizedTransactionTime,
           type,
           categoryId || null,
           categoryType,
           paymentType,
           chequeNumber || null,
           roundedAmount,
-          newBalance,
+          0,
           remarks || null,
           createdBy || null
         ]
@@ -273,28 +254,8 @@ SET t.balance = x.running_bal
         'SELECT id FROM transactions WHERE id = LAST_INSERT_ID()'
       );
 
-      // Recalculate all subsequent transactions (by date, then by id)
       const insertedId = insertResult.rows[0].id;
-      const subsequentTransactions = await pool.query(
-        `SELECT id, type, amount FROM transactions 
-         WHERE date > ? OR (date = ? AND id > ?)
-         ORDER BY date ASC, id ASC`,
-        [date, date, insertedId]
-      );
-
-      let currentBalance = newBalance;
-      for (const txn of subsequentTransactions.rows) {
-        if (txn.type === 'Debit') {
-          currentBalance = currentBalance - parseFloat(txn.amount);
-        } else {
-          currentBalance = currentBalance + parseFloat(txn.amount);
-        }
-
-        await pool.query(
-          'UPDATE transactions SET balance = ? WHERE id = ?',
-          [currentBalance, txn.id]
-        );
-      }
+      await this.recalculateAllBalances();
 
       // Get category name if category_id exists
       let categoryName = null;
@@ -322,7 +283,7 @@ SET t.balance = x.running_bal
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        'SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
         [insertedId]
       );
       const transaction = fetchResult.rows[0];
@@ -390,7 +351,7 @@ SET t.balance = x.running_bal
     }
 
     const existingResult = await pool.query(
-      'SELECT id, date, type, amount FROM transactions ORDER BY date ASC, id ASC'
+      'SELECT id, date, transaction_time, type, amount FROM transactions ORDER BY date ASC, transaction_time ASC, id ASC'
     );
     const existing = existingResult.rows;
 
@@ -430,6 +391,7 @@ SET t.balance = x.running_bal
           kind: 'new',
           date: n.date,
           type: n.type,
+          transactionTime: normalizeTransactionTime(n.transactionTime),
           categoryId: n.categoryId,
           paymentType: n.paymentType,
           chequeNumber: n.chequeNumber,
@@ -458,10 +420,11 @@ SET t.balance = x.running_bal
 
         await conn.query(
           `INSERT INTO transactions 
-           (date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             item.date,
+            item.transactionTime,
             item.type,
             item.categoryId || null,
             categoryType,
@@ -512,7 +475,17 @@ SET t.balance = x.running_bal
         return null;
       }
 
-      const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = transactionData;
+      const {
+        date,
+        transactionTime,
+        type,
+        categoryId,
+        paymentType,
+        chequeNumber,
+        amount,
+        remarks
+      } = transactionData;
+      const normalizedTransactionTime = normalizeTransactionTime(transactionTime);
 
       // Round amount to 2 decimal places
       const roundedAmount = roundToTwoDecimals(amount);
@@ -539,46 +512,22 @@ SET t.balance = x.running_bal
         }
       }
 
-      // Get balance before this transaction's date (chronologically, excluding current transaction)
-      const previousBalance = await pool.query(
-        `SELECT balance FROM transactions 
-         WHERE (date < ? OR (date = ? AND id < ?))
-         ORDER BY date DESC, id DESC LIMIT 1`,
-        [date, date, id]
-      );
-
-      let balanceBefore = 0;
-      if (previousBalance.rows.length > 0) {
-        balanceBefore = parseFloat(previousBalance.rows[0].balance);
-      }
-
-      // Calculate new balance based on updated transaction
-      let newBalance;
-      if (type === 'Debit') {
-        newBalance = balanceBefore - roundedAmount;
-      } else if (type === 'Credit') {
-        newBalance = balanceBefore + roundedAmount;
-      } else {
-        throw new Error('Invalid transaction type. Must be "Debit" or "Credit"');
-      }
-      // Round balance to 2 decimal places
-      newBalance = roundToTwoDecimals(newBalance);
-
       // Update the transaction
       const updateResult = await pool.query(
         `UPDATE transactions 
-         SET date = ?, type = ?, category_id = ?, category_type = ?, payment_type = ?, 
+         SET date = ?, transaction_time = ?, type = ?, category_id = ?, category_type = ?, payment_type = ?, 
              cheque_number = ?, amount = ?, balance = ?, remarks = ?
          WHERE id = ?`,
         [
           date,
+          normalizedTransactionTime,
           type,
           categoryId || null,
           categoryType,
           paymentType,
           chequeNumber || null,
           roundedAmount,
-          newBalance,
+          oldTransaction.balance,
           remarks || null,
           id
         ]
@@ -588,29 +537,7 @@ SET t.balance = x.running_bal
         return null;
       }
 
-      // Recalculate all subsequent transactions (by date, then by id)
-      const subsequentTransactions = await pool.query(
-        `SELECT id, type, amount FROM transactions 
-         WHERE date > ? OR (date = ? AND id > ?)
-         ORDER BY date ASC, id ASC`,
-        [date, date, id]
-      );
-
-      let currentBalance = newBalance;
-      for (const txn of subsequentTransactions.rows) {
-        if (txn.type === 'Debit') {
-          currentBalance = currentBalance - parseFloat(txn.amount);
-        } else {
-          currentBalance = currentBalance + parseFloat(txn.amount);
-        }
-        // Round balance to 2 decimal places
-        currentBalance = roundToTwoDecimals(currentBalance);
-
-        await pool.query(
-          'UPDATE transactions SET balance = ? WHERE id = ?',
-          [currentBalance, txn.id]
-        );
-      }
+      await this.recalculateAllBalances();
 
       // Get category name if category_id exists
       let categoryName = null;
@@ -627,7 +554,7 @@ SET t.balance = x.running_bal
 
       // Fetch updated transaction
       const fetchResult = await pool.query(
-        'SELECT id, date, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        'SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
         [id]
       );
       const updatedTransaction = fetchResult.rows[0];
@@ -659,54 +586,12 @@ SET t.balance = x.running_bal
   // Delete a transaction and recalculate balances
   static async delete(id) {
     try {
-      // Get the transaction to delete
       const transaction = await this.getById(id);
       if (!transaction) {
         return false;
       }
-
-      const transactionDate = transaction.date;
-
-      // Get balance before this transaction (chronologically)
-      const previousBalance = await pool.query(
-        `SELECT balance FROM transactions 
-         WHERE (date < ? OR (date = ? AND id < ?))
-         ORDER BY date DESC, id DESC LIMIT 1`,
-        [transactionDate, transactionDate, id]
-      );
-
-      let balanceBefore = 0;
-      if (previousBalance.rows.length > 0) {
-        balanceBefore = parseFloat(previousBalance.rows[0].balance);
-      }
-
-      // Delete the transaction
       await pool.query('DELETE FROM transactions WHERE id = ?', [id]);
-
-      // Recalculate all subsequent transactions (by date, then by id)
-      const subsequentTransactions = await pool.query(
-        `SELECT id, type, amount FROM transactions 
-         WHERE date > ? OR (date = ? AND id > ?)
-         ORDER BY date ASC, id ASC`,
-        [transactionDate, transactionDate, id]
-      );
-
-      let currentBalance = balanceBefore;
-      for (const txn of subsequentTransactions.rows) {
-        if (txn.type === 'Debit') {
-          currentBalance = currentBalance - parseFloat(txn.amount);
-        } else {
-          currentBalance = currentBalance + parseFloat(txn.amount);
-        }
-        // Round balance to 2 decimal places
-        currentBalance = roundToTwoDecimals(currentBalance);
-
-        await pool.query(
-          'UPDATE transactions SET balance = ? WHERE id = ?',
-          [currentBalance, txn.id]
-        );
-      }
-
+      await this.recalculateAllBalances();
       return true;
     } catch (error) {
       throw error;
@@ -734,7 +619,7 @@ SET t.balance = x.running_bal
 
     const placeholders = unique.map(() => '?').join(',');
     const r = await pool.query(
-      `SELECT id FROM transactions WHERE id IN (${placeholders}) ORDER BY date DESC, id DESC`,
+      `SELECT id FROM transactions WHERE id IN (${placeholders}) ORDER BY date DESC, transaction_time DESC, id DESC`,
       unique
     );
 

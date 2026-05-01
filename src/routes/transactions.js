@@ -81,6 +81,12 @@ function buildPdcRemarks(pdcType, description, { hideTypeFallback = false } = {}
 
 function getOrderTimestampMs(row) {
   if (!row) return 0;
+  if (row.transactionTime) {
+    const datePart = toYmd(row.date) || toYmd(new Date());
+    const candidate = new Date(`${datePart}T${String(row.transactionTime)}`);
+    const msFromTime = candidate.getTime();
+    if (Number.isFinite(msFromTime)) return msFromTime;
+  }
   const isApprovedCustomerPdc =
     (row.transactionType === 'Customer PDC' || isCustomerPdcType(row.pdcType)) &&
     row.dailyLedgerApproved === true &&
@@ -179,6 +185,7 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
+    transactionTime: isCustomerPdc ? '09:00:00' : '00:00:00',
     category: pdc.customer_name || '-',
     paymentType: 'cheque',
     chequeNumber: pdc.cheque_number || '-',
@@ -302,6 +309,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       SELECT 
         t.id,
         t.date,
+        t.transaction_time,
         t.type,
         t.category_id,
         t.category_type,
@@ -320,12 +328,13 @@ router.get('/all', authenticateToken, async (req, res) => {
       LEFT JOIN receivables_categories rc ON t.category_id = rc.id AND t.category_type = 'receivable'
       LEFT JOIN users u ON t.created_by = u.id
       ${txnDateFilter.whereClause ? `WHERE ${txnDateFilter.whereClause}` : ''}
-      ORDER BY t.date ASC, t.id ASC
+      ORDER BY t.date ASC, t.transaction_time ASC, t.id ASC
     `;
     const transactionsResult = await pool.query(transactionsQuery, txnDateFilter.params);
     let dailyTransactionsBase = transactionsResult.rows.map(txn => ({
       id: txn.id,
       date: txn.date,
+      transactionTime: txn.transaction_time || '00:00:00',
       category: txn.category_name || '-',
       paymentType: txn.payment_type,
       chequeNumber: txn.cheque_number || '-',
@@ -380,6 +389,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     const gcecPdcs = gcecPdcResult.rows.map(pdc => ({
       id: pdc.id,
       date: pdc.date,
+      transactionTime: '00:00:00',
       transactionType: 'GCEC PDC',
       customerName: pdc.customer_name,
       chequeNumber: pdc.cheque_number,
@@ -425,6 +435,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       return {
         id: pdc.id,
         date: pdc.date,
+        transactionTime: '09:00:00',
         transactionType: 'Customer PDC',
         customerName: pdc.customer_name,
         chequeNumber: pdc.cheque_number,
@@ -470,6 +481,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     const purchaseBills = purchaseBillResult.rows.map(bill => ({
       id: bill.id,
       date: bill.date,
+      transactionTime: '00:00:00',
       transactionType: 'Purchase Bill',
       vendorName: bill.vendor_name || null,
       invoiceNumber: bill.invoice_number || null,
@@ -544,6 +556,7 @@ router.get('/', authenticateToken, async (req, res) => {
     let formattedTransactions = transactions.map(txn => ({
       id: txn.id,
       date: txn.date,
+      transactionTime: txn.transaction_time || '00:00:00',
       category: txn.category_name || '-',
       paymentType: txn.payment_type,
       chequeNumber: txn.cheque_number || '-',
@@ -719,6 +732,17 @@ function normalizeTransactionDateInput(date) {
   return formattedDate;
 }
 
+function normalizeTransactionTimeInput(time) {
+  if (time == null || String(time).trim() === '') return '00:00:00';
+  const raw = String(time).trim();
+  const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
+  if (!match) return null;
+  const hh = match[1].padStart(2, '0');
+  const mm = match[2];
+  const ss = match[3] || '00';
+  return `${hh}:${mm}:${ss}`;
+}
+
 async function ensurePayableCategoryIdForImport(name) {
   const n = String(name).trim();
   if (!n) {
@@ -823,6 +847,7 @@ function formatCreatedTransactionRow(transaction) {
   return {
     id: jsonSafeInt(transaction.id),
     date: transaction.date,
+    transactionTime: transaction.transaction_time || '00:00:00',
     category: transaction.category_name || '-',
     paymentType: transaction.payment_type,
     chequeNumber: transaction.cheque_number || '-',
@@ -885,6 +910,9 @@ router.post('/bulk', authenticateToken, async (req, res) => {
         payment_type: payment_type_snake,
         chequeNumber: chequeNumberRaw,
         cheque_number: cheque_number_snake,
+        transactionTime: transactionTimeRaw,
+        transaction_time: transaction_time_snake,
+        time: timeRaw,
         amount,
         remarks,
         details,
@@ -896,6 +924,8 @@ router.post('/bulk', authenticateToken, async (req, res) => {
       let paymentType = paymentTypeRaw ?? payment_type_snake;
       let chequeNumber = chequeNumberRaw ?? cheque_number_snake;
       const detailsVal = details;
+      const transactionTimeValue =
+        transactionTimeRaw ?? transaction_time_snake ?? timeRaw ?? '00:00:00';
 
       if (
         (!paymentType || String(paymentType).trim() === '') &&
@@ -996,8 +1026,19 @@ router.post('/bulk', authenticateToken, async (req, res) => {
       }
 
       const formattedDate = normalizeTransactionDateInput(date);
+      const normalizedTransactionTime = normalizeTransactionTimeInput(
+        transactionTimeValue
+      );
+      if (!normalizedTransactionTime) {
+        errors.push({
+          index: i,
+          error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+        });
+        continue;
+      }
       normalized.push({
         date: formattedDate,
+        transactionTime: normalizedTransactionTime,
         type,
         categoryId: parsedCategoryId,
         paymentType: String(paymentType).toLowerCase(),
@@ -1109,6 +1150,7 @@ router.post(
 
         normalized.push({
           date: pr.date,
+          transactionTime: '00:00:00',
           type: pr.type,
           categoryId,
           paymentType: pr.paymentType,
@@ -1328,6 +1370,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       data: {
         id: transaction.id,
         date: transaction.date,
+        transactionTime: transaction.transaction_time || '00:00:00',
         type: transaction.type,
         categoryId: transaction.category_id,
         categoryName: transaction.category_name,
@@ -1353,7 +1396,16 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // Create a new transaction
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
+    const {
+      date,
+      transactionTime,
+      type,
+      categoryId,
+      paymentType,
+      chequeNumber,
+      amount,
+      remarks
+    } = req.body;
 
     // Validation
     if (!date || !type || !paymentType || !amount) {
@@ -1404,11 +1456,20 @@ router.post('/', authenticateToken, async (req, res) => {
       formattedDate = `${year}-${month}-${day}`;
     }
 
+    const normalizedTransactionTime = normalizeTransactionTimeInput(transactionTime);
+    if (!normalizedTransactionTime) {
+      return res.status(400).json({
+        success: false,
+        error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+      });
+    }
+
     // Get user ID from JWT token (req.user is set by authenticateToken middleware)
     const createdBy = req.user ? req.user.id : null;
 
     const transaction = await Transaction.create({
       date: formattedDate,
+      transactionTime: normalizedTransactionTime,
       type: type,
       categoryId: categoryId ? parseInt(categoryId) : null,
       paymentType: paymentType.toLowerCase(),
@@ -1565,7 +1626,16 @@ router.put(
       });
     }
 
-    const { date, type, categoryId, paymentType, chequeNumber, amount, remarks } = req.body;
+    const {
+      date,
+      transactionTime,
+      type,
+      categoryId,
+      paymentType,
+      chequeNumber,
+      amount,
+      remarks
+    } = req.body;
 
     // Validation
     if (!date || !type || !paymentType || !amount) {
@@ -1616,8 +1686,17 @@ router.put(
       formattedDate = `${year}-${month}-${day}`;
     }
 
+    const normalizedTransactionTime = normalizeTransactionTimeInput(transactionTime);
+    if (!normalizedTransactionTime) {
+      return res.status(400).json({
+        success: false,
+        error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+      });
+    }
+
     const transaction = await Transaction.update(id, {
       date: formattedDate,
+      transactionTime: normalizedTransactionTime,
       type: type,
       categoryId: categoryId ? parseInt(categoryId) : null,
       paymentType: paymentType.toLowerCase(),
@@ -1639,6 +1718,7 @@ router.put(
       data: {
         id: transaction.id,
         date: transaction.date,
+        transactionTime: transaction.transaction_time || '00:00:00',
         category: transaction.category_name || '-',
         paymentType: transaction.payment_type,
         chequeNumber: transaction.cheque_number || '-',

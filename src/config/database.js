@@ -13,6 +13,8 @@ function normalizeDbHost(raw) {
 
 const resolvedDbHost = normalizeDbHost(process.env.DB_HOST);
 const resolvedDbPort = parseInt(process.env.DB_PORT, 10) || 3306;
+const DB_SESSION_TIMEZONE = process.env.DB_SESSION_TIMEZONE || '+04:00';
+const SESSION_TZ_INITIALIZED = Symbol('sessionTimezoneInitialized');
 
 // Create MySQL connection pool
 const mysqlPool = mysql.createPool({
@@ -49,12 +51,43 @@ const wrapQuery = (executor) => {
   };
 };
 
+async function ensureConnectionTimezone(conn) {
+  if (!conn) return;
+  if (conn[SESSION_TZ_INITIALIZED]) return;
+  await conn.query('SET time_zone = ?', [DB_SESSION_TIMEZONE]);
+  conn[SESSION_TZ_INITIALIZED] = true;
+}
+
 // Create pool with pg-compatible query interface
 const pool = {
-  query: wrapQuery((sql, params) => mysqlPool.query(sql, params)),
+  async query(sql, params = []) {
+    const conn = await mysqlPool.getConnection();
+    try {
+      await ensureConnectionTimezone(conn);
+      const [result] = await conn.query(sql, params);
+      // Keep return shape compatible with previous wrapper.
+      const rows = Array.isArray(result) ? result : [];
+      const affectedRows =
+        result && typeof result.affectedRows === 'number' ? result.affectedRows : undefined;
+      let insertId;
+      if (result != null && result.insertId != null && result.insertId !== '') {
+        const n =
+          typeof result.insertId === 'bigint'
+            ? Number(result.insertId)
+            : typeof result.insertId === 'string'
+              ? parseInt(result.insertId, 10)
+              : result.insertId;
+        insertId = Number.isFinite(n) && n > 0 ? n : undefined;
+      }
+      return { rows, affectedRows, insertId };
+    } finally {
+      conn.release();
+    }
+  },
 
   async connect() {
     const conn = await mysqlPool.getConnection();
+    await ensureConnectionTimezone(conn);
     return {
       query: wrapQuery((sql, params) => conn.query(sql, params)),
       async beginTransaction() {
@@ -365,6 +398,7 @@ const initDatabase = async () => {
       CREATE TABLE IF NOT EXISTS transactions (
         id INT AUTO_INCREMENT PRIMARY KEY,
         date DATE NOT NULL,
+        transaction_time TIME NOT NULL DEFAULT '00:00:00',
         type VARCHAR(10) NOT NULL,
         category_id INT,
         category_type VARCHAR(20),
@@ -380,7 +414,15 @@ const initDatabase = async () => {
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    if (await tableExists('transactions')) {
+      if (!(await columnExists('transactions', 'transaction_time'))) {
+        await pool.query(
+          "ALTER TABLE transactions ADD COLUMN transaction_time TIME NOT NULL DEFAULT '00:00:00' AFTER `date`"
+        );
+      }
+    }
     await ensureIndex('transactions', 'idx_transactions_date', '`date`');
+    await ensureIndex('transactions', 'idx_transactions_date_time_id', '`date`, transaction_time, id');
 
     // Create post_dated_cheques
     await pool.query(`

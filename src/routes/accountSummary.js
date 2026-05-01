@@ -2,8 +2,6 @@ const express = require('express');
 const { pool } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth');
 const Transaction = require('../models/Transaction');
-const DailyBankStatement = require('../models/DailyBankStatement');
-const { parseStatementTotalsFromPdfPath } = require('../utils/parseStatementTotalsFromPdf');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   isCustomerPdcType,
@@ -13,32 +11,6 @@ const {
 } = require('../utils/pdcLedgerApproval');
 
 const router = express.Router();
-
-function hasExtractedAmounts(extracted) {
-  return extracted
-    && (extracted.totalDebitAmount != null
-      || extracted.totalCreditAmount != null
-      || extracted.ledgerBalance != null);
-}
-
-function formatStatementTotals(extracted) {
-  if (!hasExtractedAmounts(extracted)) return null;
-  return {
-    totalDebitAmount: extracted.totalDebitAmount != null ? formatAmount(extracted.totalDebitAmount) : null,
-    totalCreditAmount: extracted.totalCreditAmount != null ? formatAmount(extracted.totalCreditAmount) : null,
-    ledgerBalance: extracted.ledgerBalance != null ? formatAmount(extracted.ledgerBalance) : null
-  };
-}
-
-function getStatementTotalsFromRecord(record) {
-  if (!record) return null;
-  const extracted = {
-    totalDebitAmount: record.statement_total_debit_amount != null ? Number(record.statement_total_debit_amount) : null,
-    totalCreditAmount: record.statement_total_credit_amount != null ? Number(record.statement_total_credit_amount) : null,
-    ledgerBalance: record.statement_ledger_balance != null ? Number(record.statement_ledger_balance) : null
-  };
-  return formatStatementTotals(extracted);
-}
 
 function toYmd(d) {
   if (d == null) return '';
@@ -57,6 +29,9 @@ function sortMergedByDateThenId(rows) {
     const da = toYmd(a.date);
     const db = toYmd(b.date);
     if (da !== db) return da.localeCompare(db);
+    const ta = String(a.transactionTime || '00:00:00');
+    const tb = String(b.transactionTime || '00:00:00');
+    if (ta !== tb) return ta.localeCompare(tb);
     const ida = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
     const idb = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
     if (ida !== idb) return ida - idb;
@@ -68,7 +43,6 @@ function sortMergedByDateThenId(rows) {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const asOfDate = req.query.asOfDate || new Date().toISOString().split('T')[0];
-    const useStatementTotals = String(req.query.useStatementTotals || '').toLowerCase() === 'true';
 
     // Basic YYYY-MM-DD guard to avoid malformed input in SQL filters
     if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
@@ -110,6 +84,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const dailyRows = allTransactions.map((txn) => ({
       id: txn.id,
       date: txn.date,
+      transactionTime: txn.transaction_time || '00:00:00',
       debit: txn.type === 'Debit' ? formatAmount(txn.amount) : null,
       credit: txn.type === 'Credit' ? formatAmount(txn.amount) : null,
       remarks: txn.remarks || null
@@ -217,74 +192,26 @@ router.get('/', authenticateToken, async (req, res) => {
       latestAvailableBalance != null ? formatAmount(latestAvailableBalance) : "0.00";
     const availableBalance = mainAvailableBalance;
 
-    let statementTotals = null;
-    let statementMeta = null;
-    let statementStatus = 'not_found';
-    let statementError = null;
-    try {
-      const currentStatement = await DailyBankStatement.getCurrent();
-      if (currentStatement) {
-        statementMeta = {
-          uploadedAt: currentStatement.uploaded_at || null,
-          updatedAt: currentStatement.updated_at || null,
-          originalFilename: currentStatement.original_filename || null
-        };
-        statementStatus = 'found';
-
-        statementTotals = getStatementTotalsFromRecord(currentStatement);
-        if (statementTotals) {
-          statementStatus = 'parsed';
-        } else {
-          const readablePath = await DailyBankStatement.resolveReadableFilePath(currentStatement);
-          if (!readablePath) {
-            statementStatus = 'file_missing';
-            statementError = 'Daily statement file is missing on server storage';
-          } else {
-          const extracted = await parseStatementTotalsFromPdfPath(readablePath);
-          const formattedTotals = formatStatementTotals(extracted);
-          if (formattedTotals) {
-            statementTotals = formattedTotals;
-            statementStatus = 'parsed';
-          } else {
-            statementStatus = 'parsed_no_totals';
-          }
-        }
-        }
-      }
-    } catch (statementParseError) {
-      statementStatus = 'parse_failed';
-      statementError = statementParseError.message || 'Failed to parse daily statement';
-      console.error('Failed to parse daily bank statement totals for account summary:', statementParseError.message);
-    }
-
-    const effectiveTotalCredit =
-      useStatementTotals && statementTotals?.totalCreditAmount != null
-        ? statementTotals.totalCreditAmount
-        : totalCredit;
-    const effectiveTotalDebit =
-      useStatementTotals && statementTotals?.totalDebitAmount != null
-        ? statementTotals.totalDebitAmount
-        : totalDebit;
-    const effectiveTotalBalance =
-      useStatementTotals && statementTotals?.ledgerBalance != null
-        ? statementTotals.ledgerBalance
-        : totalBalance;
+    const statementTotals = null;
+    const statementMeta = null;
+    const statementStatus = 'disabled';
+    const statementError = null;
 
     res.json({
       success: true,
       data: {
         asOfDate,
-        totalBalance: effectiveTotalBalance,
+        totalBalance,
         mainAvailableBalance,
         availableBalance,
-        totalCredit: effectiveTotalCredit,
-        totalDebit: effectiveTotalDebit,
-        // Dashboard can directly render these values from latest uploaded daily statement file.
+        totalCredit,
+        totalDebit,
+        // Bank statement parsing is intentionally disabled; totals come from transactions table only.
         statementTotals,
         statementMeta,
         statementStatus,
         statementError,
-        totalsSource: useStatementTotals && statementTotals ? 'statement' : 'transactions',
+        totalsSource: 'transactions',
         pendingChecks: {
           count: pendingChecksCount,
           totalAmount: totalPendingCheckAmount
