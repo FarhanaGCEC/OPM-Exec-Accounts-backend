@@ -501,15 +501,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       ...customerPdcs,
       ...purchaseBills
     ];
-    const orderedAllTransactions = [...allTransactions].sort((a, b) => {
-      const da = toYmd(a.date);
-      const db = toYmd(b.date);
-      if (da !== db) return da.localeCompare(db);
-      const aCreated = getOrderTimestampMs(a);
-      const bCreated = getOrderTimestampMs(b);
-      if (aCreated !== bCreated) return aCreated - bCreated;
-      return String(a.id).localeCompare(String(b.id));
-    });
+    const orderedAllTransactions = sortMergedByDateThenId(allTransactions);
 
     const derivedRange = deriveDateRangeFromRows(orderedAllTransactions);
     const dailyRowsWithBalance = orderedAllTransactions.filter(
