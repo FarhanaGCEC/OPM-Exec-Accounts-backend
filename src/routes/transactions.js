@@ -154,6 +154,51 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
   return r.rows;
 }
 
+/**
+ * Future GCEC PDC (cheque_date > today): same row shape as matured fetch so
+ * mapPdcMaturedToSyntheticRow can mark them non–balance-affecting with correct display debit/credit.
+ */
+async function fetchPdcRowsFutureGcecForDailyLedger({ startDate, endDate } = {}) {
+  const conditions = [
+    `pdc.pdc_type = 'GCEC PDC'`,
+    `pdc.cheque_date > CURDATE()`,
+    `UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) <> 'SECURITY CHEQUE'`
+  ];
+  const params = [];
+  if (startDate) {
+    conditions.push('pdc.cheque_date >= ?');
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push('pdc.cheque_date <= ?');
+    params.push(endDate);
+  }
+  const r = await pool.query(
+    `
+    SELECT
+      pdc.id,
+      DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') AS cheque_date_ymd,
+      COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
+      pdc.daily_ledger_approved_at,
+      pdc.cheque_number,
+      pdc.customer_name,
+      pdc.amount,
+      pdc.cheque_type,
+      pdc.pdc_type,
+      pdc.description,
+      pdc.created_by,
+      u.username AS created_by_username,
+      pdc.created_at
+    FROM post_dated_cheques pdc
+    LEFT JOIN users u ON pdc.created_by = u.id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY pdc.cheque_date ASC, pdc.created_at ASC, pdc.id ASC
+    `,
+    params
+  );
+  return r.rows;
+}
+
 function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   const isCustomerPdc = isCustomerPdcType(pdc.pdc_type);
   const isGcec = isGcecPdcType(pdc.pdc_type);
@@ -169,9 +214,9 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   // use only free-text description and do not fallback to "Customer PDC" label.
   const hideTypeFallback = isCustomerPdc && ledgerApproved;
   const remarks = buildPdcRemarks(pdc.pdc_type, pdc.description, { hideTypeFallback });
-  // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
+  // GCEC PDC: always show as debit (including upcoming); does not move running balance until due (see includeInBalance).
   // Customer PDC: always show as credit in daily transactions.
-  const isCredit = (isGcec && rowDate > todayYmd) || isCustomerPdc;
+  const isCredit = isCustomerPdc;
   // Future-date transition row should not affect running balance directly.
   const includeInBalance = isUpcomingDailyTransitionPdc
     ? false
@@ -348,47 +393,33 @@ router.get('/all', authenticateToken, async (req, res) => {
       createdAt: txn.created_at
     }));
 
-    // PDCs whose cheque date has arrived: Daily Transaction rows dated as cheque_date (same range as filters when set)
-    const pdcRows = await fetchPdcRowsMaturedForDailyLedger({
+    // PDCs: matured (cheque_date <= today) + future GCEC — both go through running balance so upcoming rows get correct balance.
+    const pdcRowsMatured = await fetchPdcRowsMaturedForDailyLedger({
       startDate,
       endDate
     });
-    const pdcAsDailyBase = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
+    const pdcRowsFutureGcec = await fetchPdcRowsFutureGcecForDailyLedger({
+      startDate,
+      endDate
+    });
+    const pdcAsDailyBase = [
+      ...pdcRowsMatured.map((pdc) => mapPdcMaturedToSyntheticRow(pdc)),
+      ...pdcRowsFutureGcec.map((pdc) =>
+        mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'GCEC PDC' })
+      )
+    ];
     const mainDailyRows = sortMergedByDateThenId([...dailyTransactionsBase, ...pdcAsDailyBase]);
     await applyRunningBalancesToMainRows(mainDailyRows);
     dailyTransactionsBase = mainDailyRows;
     const dailyTransactions = dailyTransactionsBase.map((row) => ({
       ...row,
-      transactionType: 'Daily Transaction'
+      transactionType: row.transactionType || 'Daily Transaction'
     }));
 
-    // 2. Get GCEC PDC
-    const gcecPdcDateFilter = buildDateFilter('pdc.cheque_date');
-    const gcecPdcQuery = `
-      SELECT 
-        pdc.id,
-        DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') as date,
-        pdc.cheque_number,
-        pdc.customer_name,
-        pdc.amount,
-        pdc.cheque_type,
-        pdc.pdc_type,
-        pdc.description,
-        pdc.created_by,
-        u.username as created_by_username,
-        pdc.created_at,
-        'GCEC PDC' as transaction_type
-      FROM post_dated_cheques pdc
-      LEFT JOIN users u ON pdc.created_by = u.id
-      WHERE pdc.pdc_type = 'GCEC PDC'
-        AND pdc.cheque_date > CURDATE()
-      ${gcecPdcDateFilter.whereClause ? `AND ${gcecPdcDateFilter.whereClause}` : ''}
-      ORDER BY pdc.cheque_date ASC, pdc.created_at ASC
-    `;
-    const gcecPdcResult = await pool.query(gcecPdcQuery, gcecPdcDateFilter.params);
-    const gcecPdcs = gcecPdcResult.rows.map(pdc => ({
+    // 2. GCEC PDC (future only) — same source as ledger merge; listed separately for clients; not duplicated in data[].
+    const gcecPdcs = pdcRowsFutureGcec.map((pdc) => ({
       id: pdc.id,
-      date: pdc.date,
+      date: pdc.cheque_date_ymd || toYmd(pdc.cheque_date),
       transactionTime: '00:00:00',
       transactionType: 'GCEC PDC',
       customerName: pdc.customer_name,
@@ -497,7 +528,6 @@ router.get('/all', authenticateToken, async (req, res) => {
 
     const allTransactions = [
       ...dailyTransactions,
-      ...gcecPdcs,
       ...customerPdcs,
       ...purchaseBills
     ];
@@ -562,8 +592,14 @@ router.get('/', authenticateToken, async (req, res) => {
       createdAt: txn.created_at
     }));
 
-    const pdcRows = await fetchPdcRowsMaturedForDailyLedger();
-    const synthetic = pdcRows.map((pdc) => mapPdcMaturedToSyntheticRow(pdc));
+    const pdcRowsMatured = await fetchPdcRowsMaturedForDailyLedger();
+    const pdcRowsFutureGcec = await fetchPdcRowsFutureGcecForDailyLedger();
+    const synthetic = [
+      ...pdcRowsMatured.map((pdc) => mapPdcMaturedToSyntheticRow(pdc)),
+      ...pdcRowsFutureGcec.map((pdc) =>
+        mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'GCEC PDC' })
+      )
+    ];
     const rowsForRunningBalance = sortMergedByDateThenId([...formattedTransactions, ...synthetic]);
     await applyRunningBalancesToMainRows(rowsForRunningBalance);
     formattedTransactions = rowsForRunningBalance;
@@ -1595,8 +1631,7 @@ router.put(
 
       const todayYmd = toYmd(new Date());
       const isCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
-      const isGcec = isGcecPdcType(updatedPdc.pdc_type);
-      const isCredit = (isGcec && updatedPdc.cheque_date > todayYmd) || isCustomerPdc;
+      const isCredit = isCustomerPdc;
 
       return res.json({
         success: true,

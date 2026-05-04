@@ -5,7 +5,6 @@ const Transaction = require('../models/Transaction');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   isCustomerPdcType,
-  isGcecPdcType,
   parseDailyLedgerApproved,
   shouldPdcAffectBalance
 } = require('../utils/pdcLedgerApproval');
@@ -117,15 +116,13 @@ router.get('/', authenticateToken, async (req, res) => {
       .map((pdc) => {
         const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
         const isCustomerPdc = isCustomerPdcType(pdc.pdc_type);
-        const isGcecPdc = isGcecPdcType(pdc.pdc_type);
         const ledgerApproved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
         const shouldAffectBalance = isCustomerPdc
           ? ledgerApproved
           : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
         const todayYmd = toYmd(new Date());
-        // GCEC PDC: before cheque date show as credit; on/after cheque date show as debit.
-        // Customer PDC: always show as credit in daily transactions.
-        const isCredit = (isGcecPdc && rowDate > todayYmd) || isCustomerPdc;
+        // GCEC PDC: always debit in ledger display (including upcoming). Customer PDC: always credit.
+        const isCredit = isCustomerPdc;
         return {
           id: `pdc-due-${pdc.id}`,
           date: rowDate,
