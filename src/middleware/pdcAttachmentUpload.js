@@ -3,7 +3,7 @@ const multer = require('multer');
 
 const storage = multer.memoryStorage();
 
-const ALLOWED_MIME = new Set([
+const ALLOWED_IMAGE_MIME = new Set([
   'image/jpeg',
   'image/png',
   'image/webp',
@@ -12,24 +12,30 @@ const ALLOWED_MIME = new Set([
   'image/heif'
 ]);
 
-const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
+const ALLOWED_PDF_MIME = new Set(['application/pdf']);
 
-function imageFileFilter(_req, file, cb) {
+const ALLOWED_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
+const ALLOWED_PDF_EXT = new Set(['.pdf']);
+
+const ALLOWED_MIME = new Set([...ALLOWED_IMAGE_MIME, ...ALLOWED_PDF_MIME]);
+const ALLOWED_EXT = new Set([...ALLOWED_IMAGE_EXT, ...ALLOWED_PDF_EXT]);
+
+function attachmentFileFilter(_req, file, cb) {
   const ext = path.extname(file.originalname || '').toLowerCase();
   if (ALLOWED_MIME.has(file.mimetype) || ALLOWED_EXT.has(ext)) {
     return cb(null, true);
   }
-  cb(new Error('Only image files are allowed (JPEG, PNG, WebP, GIF, HEIC)'));
+  cb(new Error('Only image (JPEG, PNG, WebP, GIF, HEIC) or PDF files are allowed'));
 }
 
-const uploadPdcImage = multer({
+const uploadPdcAttachment = multer({
   storage,
   limits: { fileSize: 15 * 1024 * 1024 },
-  fileFilter: imageFileFilter
+  fileFilter: attachmentFileFilter
 });
 
 function pdcImageUploadMiddleware(req, res, next) {
-  uploadPdcImage.single('attachment')(req, res, (err) => {
+  uploadPdcAttachment.single('attachment')(req, res, (err) => {
     if (err) {
       const msg = err.message || 'Upload failed';
       return res.status(400).json({ success: false, error: msg });
@@ -44,7 +50,7 @@ function optionalPdcImageMultipart(req, res, next) {
   if (!ct.includes('multipart/form-data')) {
     return next();
   }
-  uploadPdcImage.single('attachment')(req, res, (err) => {
+  uploadPdcAttachment.single('attachment')(req, res, (err) => {
     if (err) {
       const msg = err.message || 'Upload failed';
       return res.status(400).json({ success: false, error: msg });
@@ -54,7 +60,12 @@ function optionalPdcImageMultipart(req, res, next) {
 }
 
 module.exports = {
-  uploadPdcImage,
+  uploadPdcAttachment,
+  uploadPdcImage: uploadPdcAttachment,
   pdcImageUploadMiddleware,
-  optionalPdcImageMultipart
+  optionalPdcImageMultipart,
+  ALLOWED_IMAGE_EXT,
+  ALLOWED_PDF_EXT,
+  ALLOWED_IMAGE_MIME,
+  ALLOWED_PDF_MIME
 };

@@ -440,6 +440,7 @@ const initDatabase = async () => {
         attachment_name VARCHAR(512) NULL,
         attachment_url TEXT NULL,
         attachment_cloudinary_public_id VARCHAR(512) NULL,
+        attachment_resource_type VARCHAR(16) NULL,
         created_by INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -461,6 +462,11 @@ const initDatabase = async () => {
       if (!(await columnExists('post_dated_cheques', 'attachment_cloudinary_public_id'))) {
         await pool.query(
           'ALTER TABLE post_dated_cheques ADD COLUMN attachment_cloudinary_public_id VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('post_dated_cheques', 'attachment_resource_type'))) {
+        await pool.query(
+          "ALTER TABLE post_dated_cheques ADD COLUMN attachment_resource_type VARCHAR(16) NULL"
         );
       }
       if (!(await columnExists('post_dated_cheques', 'daily_ledger_approved'))) {

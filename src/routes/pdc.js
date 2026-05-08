@@ -1,7 +1,7 @@
 const path = require('path');
 const express = require('express');
 const PDC = require('../models/PDC');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { USER_ROLES } = require('../constants/roles');
 const { queuePdcDelete, queuePdcUpdate } = require('../controllers/pdcChangeRequestQueue');
@@ -17,7 +17,10 @@ const { pdcImageUploadMiddleware, optionalPdcImageMultipart } = require('../midd
 const { buildPdcAttachmentPayload, normalizeMediaUrl } = require('../utils/attachmentPayload');
 
 const MAX_PDC_IMAGE_BYTES = 15 * 1024 * 1024;
-const PDC_IMAGE_FILENAME_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
+// Accepts cheque scans (images) and signed cheque copies (PDFs).
+const PDC_IMAGE_FILENAME_EXT = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.pdf'
+]);
 
 const router = express.Router();
 
@@ -41,6 +44,7 @@ function formatPdcForApi(pdc) {
     attachment_name,
     attachment_url,
     attachment_cloudinary_public_id,
+    attachment_resource_type,
     daily_ledger_approved,
     daily_ledger_approved_at,
     ...rest
@@ -116,10 +120,10 @@ function pdcMultipartValidationHint(req) {
 }
 
 /**
- * Optional image with JSON body (avoids multipart when proxies/serverless break FormData).
+ * Optional attachment with JSON body (avoids multipart when proxies/serverless break FormData).
  * Body: attachmentBase64 / attachment_base64 (+ optional attachmentFilename / attachment_filename).
- * Accepts raw base64 or data URL data:image/...;base64,...
- * Returns { buffer, originalName } | null (no image) | { error }
+ * Accepts raw base64 or data URL data:image/...;base64,... or data:application/pdf;base64,...
+ * Returns { buffer, originalName, mimetype } | null (no attachment) | { error }
  */
 function decodePdcImageBase64FromBody(body = {}) {
   const raw =
@@ -138,9 +142,11 @@ function decodePdcImageBase64FromBody(body = {}) {
     .slice(0, 512);
 
   let b64 = String(raw).trim();
-  const dataUrl = b64.match(/^data:image\/[^;]+;base64,(.+)$/i);
+  let mimetypeFromDataUrl = null;
+  const dataUrl = b64.match(/^data:([^;]+);base64,(.+)$/i);
   if (dataUrl) {
-    b64 = dataUrl[1];
+    mimetypeFromDataUrl = dataUrl[1].toLowerCase();
+    b64 = dataUrl[2];
   }
   b64 = b64.replace(/\s/g, '');
 
@@ -154,7 +160,7 @@ function decodePdcImageBase64FromBody(body = {}) {
     return { error: 'attachmentBase64 decoded to empty data' };
   }
   if (buffer.length > MAX_PDC_IMAGE_BYTES) {
-    return { error: `Cheque image exceeds maximum size (${MAX_PDC_IMAGE_BYTES} bytes)` };
+    return { error: `Cheque attachment exceeds maximum size (${MAX_PDC_IMAGE_BYTES} bytes)` };
   }
   const ext = path.extname(originalName).toLowerCase();
   if (ext && !PDC_IMAGE_FILENAME_EXT.has(ext)) {
@@ -162,10 +168,25 @@ function decodePdcImageBase64FromBody(body = {}) {
       error: `Unsupported attachment filename extension (allowed: ${[...PDC_IMAGE_FILENAME_EXT].join(', ')})`
     };
   }
-  return { buffer, originalName };
+  if (
+    mimetypeFromDataUrl &&
+    !mimetypeFromDataUrl.startsWith('image/') &&
+    mimetypeFromDataUrl !== 'application/pdf'
+  ) {
+    return {
+      error: 'Unsupported attachmentBase64 MIME type (only image/* or application/pdf are allowed)'
+    };
+  }
+  return { buffer, originalName, mimetype: mimetypeFromDataUrl || null };
 }
 
-async function savePdcAttachmentBuffer(pdcId, buffer, originalName, prevCloudinaryPublicId = null) {
+async function savePdcAttachmentBuffer(
+  pdcId,
+  buffer,
+  originalName,
+  prevCloudinary = null,
+  mimetype = null
+) {
   if (!buffer || buffer.length === 0) {
     return { ok: true };
   }
@@ -183,32 +204,50 @@ async function savePdcAttachmentBuffer(pdcId, buffer, originalName, prevCloudina
     uploaded = await uploadPdcChequeImage({
       buffer,
       pdcId,
-      originalFilename: name
+      originalFilename: name,
+      mimetype
     });
   } catch (e) {
     console.error('Cloudinary PDC upload error:', e);
     return {
       ok: false,
       status: 502,
-      error: e.message || 'Failed to upload cheque image to Cloudinary'
+      error: e.message || 'Failed to upload cheque attachment to Cloudinary'
     };
   }
   await PDC.setChequeAttachment(pdcId, {
     attachmentName: name,
     attachmentUrl: uploaded.secure_url,
-    attachmentCloudinaryPublicId: uploaded.public_id
+    attachmentCloudinaryPublicId: uploaded.public_id,
+    attachmentResourceType: uploaded.resource_type || 'image'
   });
-  if (prevCloudinaryPublicId && prevCloudinaryPublicId !== uploaded.public_id) {
-    await destroyPdcChequeImage(prevCloudinaryPublicId);
+  const prev = normalizePrevCloudinary(prevCloudinary);
+  if (prev.publicId && prev.publicId !== uploaded.public_id) {
+    await destroyPdcChequeImage(prev.publicId, prev.resourceType);
   }
   return { ok: true };
 }
 
-async function finalizePdcAttachment(req, pdcId, prevCloudinaryPublicId = null) {
+function normalizePrevCloudinary(prev) {
+  if (!prev) return { publicId: null, resourceType: 'image' };
+  if (typeof prev === 'string') return { publicId: prev, resourceType: 'image' };
+  return {
+    publicId: prev.publicId || null,
+    resourceType: prev.resourceType || 'image'
+  };
+}
+
+async function finalizePdcAttachment(req, pdcId, prevCloudinary = null) {
   if (!req.file) {
     return { ok: true };
   }
-  return savePdcAttachmentBuffer(pdcId, req.file.buffer, req.file.originalname, prevCloudinaryPublicId);
+  return savePdcAttachmentBuffer(
+    pdcId,
+    req.file.buffer,
+    req.file.originalname,
+    prevCloudinary,
+    req.file.mimetype
+  );
 }
 
 // Get all post-dated cheques
@@ -288,7 +327,8 @@ router.get('/reminders', authenticateToken, async (req, res) => {
   }
 });
 
-// Cheque image on Cloudinary — multipart field `attachment` (JPEG, PNG, WebP, GIF, HEIC)
+// Cheque attachment on Cloudinary — multipart field `attachment`
+// Accepts images (JPEG, PNG, WebP, GIF, HEIC) and PDF documents.
 router.post(
   '/:id/attachment',
   authenticateToken,
@@ -307,7 +347,7 @@ router.post(
       if (!req.file) {
         return res.status(400).json({
           success: false,
-          error: 'Missing image: send multipart field "attachment"'
+          error: 'Missing attachment: send multipart field "attachment" (image or PDF)'
         });
       }
 
@@ -325,6 +365,7 @@ router.post(
       }
 
       const prevCloudinaryId = existing.attachment_cloudinary_public_id;
+      const prevResourceType = existing.attachment_resource_type || 'image';
       const originalName = (req.file.originalname || 'cheque.jpg').slice(0, 512);
 
       let uploaded;
@@ -332,37 +373,39 @@ router.post(
         uploaded = await uploadPdcChequeImage({
           buffer: req.file.buffer,
           pdcId,
-          originalFilename: originalName
+          originalFilename: originalName,
+          mimetype: req.file.mimetype
         });
       } catch (cloudErr) {
         console.error('Cloudinary PDC upload error:', cloudErr);
         return res.status(502).json({
           success: false,
-          error: cloudErr.message || 'Failed to upload cheque image to Cloudinary'
+          error: cloudErr.message || 'Failed to upload cheque attachment to Cloudinary'
         });
       }
 
       await PDC.setChequeAttachment(pdcId, {
         attachmentName: originalName,
         attachmentUrl: uploaded.secure_url,
-        attachmentCloudinaryPublicId: uploaded.public_id
+        attachmentCloudinaryPublicId: uploaded.public_id,
+        attachmentResourceType: uploaded.resource_type || 'image'
       });
 
       if (prevCloudinaryId && prevCloudinaryId !== uploaded.public_id) {
-        await destroyPdcChequeImage(prevCloudinaryId);
+        await destroyPdcChequeImage(prevCloudinaryId, prevResourceType);
       }
 
       const pdc = await PDC.getById(pdcId);
       res.json({
         success: true,
-        message: 'Cheque image attached',
+        message: 'Cheque attachment saved',
         data: formatPdcForApi(pdc)
       });
     } catch (error) {
-      console.error('Error attaching PDC image:', error);
+      console.error('Error attaching PDC attachment:', error);
       res.status(500).json({
         success: false,
-        error: error.message || 'Failed to attach cheque image'
+        error: error.message || 'Failed to attach cheque attachment'
       });
     }
   }
@@ -424,8 +467,14 @@ router.patch(
   }
 );
 
-// Redirect to Cloudinary URL (same attachment as in list/detail)
-router.get('/:id/attachment', authenticateToken, async (req, res) => {
+// Serve the cheque attachment.
+// - Images: redirect to the public Cloudinary URL (cheap, cacheable).
+// - PDFs (resource_type=raw): stream through this backend using a signed
+//   Cloudinary download URL. This bypasses the "PDF and ZIP files delivery"
+//   security toggle that otherwise causes 401s on /raw/upload/*.pdf URLs.
+// Accepts auth via Authorization header OR `?token=...` query string so
+// that <iframe>/<img>/<embed> tags can load it directly.
+router.get('/:id/attachment', authenticateTokenOrQuery, async (req, res) => {
   try {
     const pdcId = parseInt(req.params.id, 10);
     if (Number.isNaN(pdcId)) {
@@ -444,17 +493,93 @@ router.get('/:id/attachment', authenticateToken, async (req, res) => {
     if (!mediaUrl) {
       return res.status(404).json({
         success: false,
-        error: 'No cheque image attached'
+        error: 'No cheque attachment available'
       });
     }
 
-    res.redirect(302, mediaUrl);
+    const resourceType = pdc.attachment_resource_type || 'image';
+    const isPdf = resourceType === 'raw' || /\.pdf($|\?)/i.test(pdc.attachment_name || pdc.attachment_url);
+
+    if (!isPdf) {
+      return res.redirect(302, mediaUrl);
+    }
+
+    if (!isCloudinaryConfigured() || !pdc.attachment_cloudinary_public_id) {
+      return res.redirect(302, mediaUrl);
+    }
+
+    let signedUrl;
+    try {
+      const { cloudinary } = require('../config/cloudinary');
+      // For raw resources the file extension is already part of the stored
+      // public_id (e.g. "gcec-pdc-cheques/30/foo.pdf"), so we pass an empty
+      // format here to avoid Cloudinary treating it as ".pdf.pdf".
+      signedUrl = cloudinary.utils.private_download_url(
+        pdc.attachment_cloudinary_public_id,
+        '',
+        {
+          resource_type: 'raw',
+          type: 'upload',
+          expires_at: Math.floor(Date.now() / 1000) + 600
+        }
+      );
+    } catch (e) {
+      console.error('Cloudinary private_download_url error:', e);
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to sign Cloudinary download URL'
+      });
+    }
+
+    let upstream;
+    try {
+      upstream = await fetch(signedUrl);
+    } catch (e) {
+      console.error('PDC PDF fetch error:', e);
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to retrieve PDC attachment from Cloudinary'
+      });
+    }
+    if (!upstream.ok) {
+      const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status;
+      return res.status(status).json({
+        success: false,
+        error: `Cloudinary returned ${upstream.status} fetching attachment`
+      });
+    }
+
+    const filename = (pdc.attachment_name || `cheque-${pdc.id}.pdf`).replace(/"/g, '');
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/pdf');
+    const upstreamLen = upstream.headers.get('content-length');
+    if (upstreamLen) res.setHeader('Content-Length', upstreamLen);
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    if (!upstream.body) {
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      return res.end(buf);
+    }
+    const reader = upstream.body.getReader();
+    res.on('close', () => { try { reader.cancel(); } catch (_) {} });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!res.write(Buffer.from(value))) {
+        await new Promise((r) => res.once('drain', r));
+      }
+    }
+    res.end();
   } catch (error) {
     console.error('Error resolving PDC attachment:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to resolve attachment'
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to resolve attachment'
+      });
+    } else {
+      try { res.end(); } catch (_) {}
+    }
   }
 });
 
@@ -588,7 +713,13 @@ router.post('/', optionalPdcImageMultipart, authenticateToken, async (req, res) 
     if (req.file) {
       attachResult = await finalizePdcAttachment(req, pdc.id, null);
     } else if (decodedImage && decodedImage.buffer) {
-      attachResult = await savePdcAttachmentBuffer(pdc.id, decodedImage.buffer, decodedImage.originalName, null);
+      attachResult = await savePdcAttachmentBuffer(
+        pdc.id,
+        decodedImage.buffer,
+        decodedImage.originalName,
+        null,
+        decodedImage.mimetype || null
+      );
     } else {
       attachResult = { ok: true };
     }
@@ -633,7 +764,7 @@ const updatePdcHandler = async (req, res) => {
       });
     }
 
-    let prevCloudinaryPublicId = null;
+    let prevCloudinary = null;
     if (req.file || (decodedImage && decodedImage.buffer)) {
       const existingForAttach = await PDC.getById(id);
       if (!existingForAttach) {
@@ -642,7 +773,12 @@ const updatePdcHandler = async (req, res) => {
           error: 'Post-dated cheque not found'
         });
       }
-      prevCloudinaryPublicId = existingForAttach.attachment_cloudinary_public_id || null;
+      if (existingForAttach.attachment_cloudinary_public_id) {
+        prevCloudinary = {
+          publicId: existingForAttach.attachment_cloudinary_public_id,
+          resourceType: existingForAttach.attachment_resource_type || 'image'
+        };
+      }
     }
 
     const { chequeDate, chequeNumber, customerName, amount, chequeType, pdcType, description } = normalizePdcInput(
@@ -727,13 +863,14 @@ const updatePdcHandler = async (req, res) => {
 
     let attachResult;
     if (req.file) {
-      attachResult = await finalizePdcAttachment(req, id, prevCloudinaryPublicId);
+      attachResult = await finalizePdcAttachment(req, id, prevCloudinary);
     } else if (decodedImage && decodedImage.buffer) {
       attachResult = await savePdcAttachmentBuffer(
         id,
         decodedImage.buffer,
         decodedImage.originalName,
-        prevCloudinaryPublicId
+        prevCloudinary,
+        decodedImage.mimetype || null
       );
     } else {
       attachResult = { ok: true };
@@ -804,7 +941,10 @@ router.delete(
     const { id } = req.params;
     const existing = await PDC.getById(id);
     if (existing?.attachment_cloudinary_public_id) {
-      await destroyPdcChequeImage(existing.attachment_cloudinary_public_id);
+      await destroyPdcChequeImage(
+        existing.attachment_cloudinary_public_id,
+        existing.attachment_resource_type || 'image'
+      );
     }
 
     const deleted = await PDC.delete(id);

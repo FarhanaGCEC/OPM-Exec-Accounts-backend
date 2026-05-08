@@ -81,18 +81,18 @@ function buildPdcRemarks(pdcType, description, { hideTypeFallback = false } = {}
 
 function getOrderTimestampMs(row) {
   if (!row) return 0;
+  // Anchor sorting to the row's calendar date + time-of-day. For approved
+  // Customer PDCs the row.transactionTime is already set to the time portion
+  // of daily_ledger_approved_at, so combining it with row.date (cheque date)
+  // yields the right intra-day sort key and avoids UTC/local day-drift.
   if (row.transactionTime) {
     const datePart = toYmd(row.date) || toYmd(new Date());
     const candidate = new Date(`${datePart}T${String(row.transactionTime)}`);
     const msFromTime = candidate.getTime();
     if (Number.isFinite(msFromTime)) return msFromTime;
   }
-  const isApprovedCustomerPdc =
-    (row.transactionType === 'Customer PDC' || isCustomerPdcType(row.pdcType)) &&
-    row.dailyLedgerApproved === true &&
-    row.dailyLedgerApprovedAt;
-  const primary = isApprovedCustomerPdc ? row.dailyLedgerApprovedAt : row.createdAt;
-  const ms = primary ? new Date(primary).getTime() : 0;
+  const fallback = row.createdAt;
+  const ms = fallback ? new Date(fallback).getTime() : 0;
   return Number.isFinite(ms) ? ms : 0;
 }
 
@@ -107,6 +107,16 @@ function formatTimestampForDisplay(value) {
   const mm = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
   return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+}
+
+function formatTimeForDisplay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
 }
 
 /**
@@ -154,14 +164,17 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
   return r.rows;
 }
 
+const UPCOMING_GCEC_PDC_LOOKAHEAD_DAYS = 15;
+
 /**
- * Future GCEC PDC (cheque_date > today): same row shape as matured fetch so
- * mapPdcMaturedToSyntheticRow can mark them non–balance-affecting with correct display debit/credit.
+ * Future GCEC PDC inside the 15-day lookahead window (cheque_date > today AND <= today + 15 days):
+ * shown inline in the daily ledger and counted in the running balance (debit), same row shape as matured fetch.
  */
 async function fetchPdcRowsFutureGcecForDailyLedger({ startDate, endDate } = {}) {
   const conditions = [
     `pdc.pdc_type = 'GCEC PDC'`,
     `pdc.cheque_date > CURDATE()`,
+    `pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL ${UPCOMING_GCEC_PDC_LOOKAHEAD_DAYS} DAY)`,
     `UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) <> 'SECURITY CHEQUE'`
   ];
   const params = [];
@@ -217,20 +230,29 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
   // GCEC PDC: always show as debit (including upcoming); does not move running balance until due (see includeInBalance).
   // Customer PDC: always show as credit in daily transactions.
   const isCredit = isCustomerPdc;
-  // Future-date transition row should not affect running balance directly.
+  // Balance rules:
+  // - Matured Customer PDC: always counted (approval only changes ordering time).
+  // - Upcoming GCEC PDC (within 15 days, see fetchPdcRowsFutureGcecForDailyLedger): counted as a forecasted debit so the running balance reflects the upcoming outflow.
+  // - Future Customer PDC: still excluded (kept in the upcoming pipeline, not in running balance).
   const includeInBalance = isUpcomingDailyTransitionPdc
-    ? false
+    ? isGcec
     : isCustomerPdc
-      ? ledgerApproved
+      ? true
       : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
   const debitValue = !isCredit ? formatAmount(pdc.amount) : null;
   const creditValue = isCredit ? formatAmount(pdc.amount) : null;
   const pendingNoDateCredit =
     isUpcomingDailyTransitionPdc && isCredit ? formatAmount(pdc.amount) : null;
+  const isUpcomingGcecInline = isUpcomingDailyTransitionPdc && isGcec;
   const base = {
     id: `pdc-due-${pdc.id}`,
     date: rowDate,
-    transactionTime: isCustomerPdc ? '09:00:00' : '00:00:00',
+    transactionTime:
+      isCustomerPdc && ledgerApproved
+        ? formatTimeForDisplay(pdc.daily_ledger_approved_at) || '09:00:00'
+        : isCustomerPdc
+          ? '09:00:00'
+          : '00:00:00',
     category: pdc.customer_name || '-',
     paymentType: 'cheque',
     chequeNumber: pdc.cheque_number || '-',
@@ -257,10 +279,13 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     pendingNoDateCredit,
     /** Explicit flag for UI — use this or showLedgerApprovalCheckbox (do not rely on remarks text alone) */
     pendingGcecLedgerApproval: approvalRelevantNow && !ledgerApproved,
-    /** When true, UI may clone this row at table end (no date on clone); backend sends this row once only */
+    /** When true, UI may clone this row at table end (no date on clone); backend sends this row once only.
+     * Upcoming GCEC PDC shows inline (within the 15-day window) and counts in balance, so no footer duplicate.
+     */
     ledgerApprovalFooterDuplicateForUi:
-      isUpcomingDailyTransitionPdc || (approvalRelevantNow && !ledgerApproved),
-    showAtDailyTransitionEnd: isUpcomingDailyTransitionPdc
+      (isUpcomingDailyTransitionPdc && !isUpcomingGcecInline) ||
+      (approvalRelevantNow && !ledgerApproved),
+    showAtDailyTransitionEnd: isUpcomingDailyTransitionPdc && !isUpcomingGcecInline
   };
   if (transactionType) {
     return { ...base, transactionType };
@@ -276,11 +301,33 @@ function sortMergedByDateThenId(rows) {
     const aOrderMs = getOrderTimestampMs(a);
     const bOrderMs = getOrderTimestampMs(b);
     if (aOrderMs !== bOrderMs) return aOrderMs - bOrderMs;
-    const ida = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
-    const idb = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
+    const ida = numericSortIdValue(a);
+    const idb = numericSortIdValue(b);
     if (ida !== idb) return ida - idb;
-    return String(a.id).localeCompare(String(b.id));
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
   });
+}
+
+/**
+ * Stable numeric tiebreak across regular ledger ids and synthetic `pdc-due-N` ids.
+ * Without this, two rows tied on date+time fall back to string lex compare, which orders
+ * `pdc-due-118` before `pdc-due-52` and the running balance ends up in the opposite order
+ * the UI displays (UI sorts numerically).
+ */
+function numericSortIdValue(row) {
+  if (!row) return Number.MAX_SAFE_INTEGER;
+  if (typeof row.id === 'number' && Number.isFinite(row.id)) return row.id;
+  if (row.pdcId != null) {
+    const n = Number(row.pdcId);
+    if (Number.isFinite(n)) return n;
+  }
+  if (typeof row.id === 'string') {
+    const m = /^pdc-due-(\d+)$/i.exec(row.id);
+    if (m) return parseInt(m[1], 10);
+    const n = parseInt(row.id, 10);
+    if (Number.isFinite(n)) return n;
+  }
+  return Number.MAX_SAFE_INTEGER;
 }
 
 function deriveDateRangeFromRows(rows) {
@@ -404,9 +451,7 @@ router.get('/all', authenticateToken, async (req, res) => {
     });
     const pdcAsDailyBase = [
       ...pdcRowsMatured.map((pdc) => mapPdcMaturedToSyntheticRow(pdc)),
-      ...pdcRowsFutureGcec.map((pdc) =>
-        mapPdcMaturedToSyntheticRow(pdc, { transactionType: 'GCEC PDC' })
-      )
+      ...pdcRowsFutureGcec.map((pdc) => mapPdcMaturedToSyntheticRow(pdc))
     ];
     const mainDailyRows = sortMergedByDateThenId([...dailyTransactionsBase, ...pdcAsDailyBase]);
     await applyRunningBalancesToMainRows(mainDailyRows);
@@ -466,7 +511,9 @@ router.get('/all', authenticateToken, async (req, res) => {
       return {
         id: pdc.id,
         date: pdc.date,
-        transactionTime: '09:00:00',
+        transactionTime: ledgerApproved
+          ? formatTimeForDisplay(pdc.daily_ledger_approved_at) || '09:00:00'
+          : '09:00:00',
         transactionType: 'Customer PDC',
         customerName: pdc.customer_name,
         chequeNumber: pdc.cheque_number,
@@ -604,9 +651,10 @@ router.get('/', authenticateToken, async (req, res) => {
     await applyRunningBalancesToMainRows(rowsForRunningBalance);
     formattedTransactions = rowsForRunningBalance;
 
+    const todayYmd = toYmd(new Date());
     const lastDailyRowWithBalance = [...rowsForRunningBalance]
       .reverse()
-      .find((row) => row.balance != null);
+      .find((row) => row.balance != null && toYmd(row.date) <= todayYmd);
     const currentBalance = lastDailyRowWithBalance
       ? lastDailyRowWithBalance.balance
       : rowsForRunningBalance.length > 0
@@ -1572,6 +1620,7 @@ router.put(
               ? body.remarks
               : existingPdc.description;
       const description = normalizePdcDescriptionInput(descriptionInput, pdcType);
+      const transactionTimeInput = body.transactionTime ?? body.transaction_time ?? body.time;
 
       if (!inputDate || !chequeNumber || !customerName || amountRaw == null || !chequeType || !pdcType) {
         return res.status(400).json({
@@ -1606,6 +1655,17 @@ router.put(
         formattedDate = `${year}-${month}-${day}`;
       }
 
+      const normalizedTransactionTime =
+        transactionTimeInput == null || String(transactionTimeInput).trim() === ''
+          ? null
+          : normalizeTransactionTimeInput(transactionTimeInput);
+      if (transactionTimeInput != null && String(transactionTimeInput).trim() !== '' && !normalizedTransactionTime) {
+        return res.status(400).json({
+          success: false,
+          error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+        });
+      }
+
       if (pdcType === 'Custom PDC' && (!description || String(description).trim() === '')) {
         return res.status(400).json({
           success: false,
@@ -1629,26 +1689,49 @@ router.put(
         });
       }
 
-      const todayYmd = toYmd(new Date());
-      const isCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
+      let responsePdc = updatedPdc;
+      const updatedIsCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
+      const updatedLedgerApproved = parseDailyLedgerApproved(updatedPdc.daily_ledger_approved);
+      if (normalizedTransactionTime && updatedIsCustomerPdc && updatedLedgerApproved) {
+        const approvedAt = `${formattedDate} ${normalizedTransactionTime}`;
+        responsePdc = await PDC.setDailyLedgerApprovedAt(updatedPdc.id, approvedAt);
+        if (!responsePdc) {
+          return res.status(404).json({
+            success: false,
+            error: 'Post-dated cheque not found'
+          });
+        }
+      }
+
+      const isCustomerPdc = isCustomerPdcType(responsePdc.pdc_type);
       const isCredit = isCustomerPdc;
+      const ledgerApproved = parseDailyLedgerApproved(responsePdc.daily_ledger_approved);
+      const transactionTime = isCustomerPdc
+        ? ledgerApproved
+          ? formatTimeForDisplay(responsePdc.daily_ledger_approved_at) || '09:00:00'
+          : '09:00:00'
+        : '00:00:00';
 
       return res.json({
         success: true,
         message: 'Daily transition PDC updated successfully',
         data: {
-          id: `pdc-due-${updatedPdc.id}`,
-          pdcId: updatedPdc.id,
-          date: updatedPdc.cheque_date,
-          category: updatedPdc.customer_name || '-',
+          id: `pdc-due-${responsePdc.id}`,
+          pdcId: responsePdc.id,
+          date: responsePdc.cheque_date,
+          transactionTime,
+          category: responsePdc.customer_name || '-',
           paymentType: 'cheque',
-          chequeNumber: updatedPdc.cheque_number || '-',
-          debit: isCredit ? null : formatAmount(updatedPdc.amount),
-          credit: isCredit ? formatAmount(updatedPdc.amount) : null,
-          remarks: buildPdcRemarks(updatedPdc.pdc_type, updatedPdc.description, {
-            hideTypeFallback: isCustomerPdc && parseDailyLedgerApproved(updatedPdc.daily_ledger_approved)
+          chequeNumber: responsePdc.cheque_number || '-',
+          debit: isCredit ? null : formatAmount(responsePdc.amount),
+          credit: isCredit ? formatAmount(responsePdc.amount) : null,
+          remarks: buildPdcRemarks(responsePdc.pdc_type, responsePdc.description, {
+            hideTypeFallback: isCustomerPdc && ledgerApproved
           }),
-          pdcType: updatedPdc.pdc_type
+          pdcType: responsePdc.pdc_type,
+          dailyLedgerApproved: ledgerApproved,
+          dailyLedgerApprovedAt: responsePdc.daily_ledger_approved_at || null,
+          dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(responsePdc.daily_ledger_approved_at)
         }
       });
     }

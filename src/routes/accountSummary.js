@@ -5,6 +5,7 @@ const Transaction = require('../models/Transaction');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   isCustomerPdcType,
+  isGcecPdcType,
   parseDailyLedgerApproved,
   shouldPdcAffectBalance
 } = require('../utils/pdcLedgerApproval');
@@ -23,19 +24,60 @@ function toYmd(d) {
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
 }
 
+function formatTimeForDisplay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function getOrderTimestampMs(row) {
+  if (!row) return 0;
+  // Approved Customer PDC rows already carry transactionTime equal to the
+  // time-of-day portion of daily_ledger_approved_at. Combining row.date with
+  // that time gives the correct intra-day sort key without UTC drift that
+  // would otherwise push the row onto a different calendar day.
+  if (row.transactionTime) {
+    const datePart = toYmd(row.date) || toYmd(new Date());
+    const candidate = new Date(`${datePart}T${String(row.transactionTime)}`);
+    const msFromTime = candidate.getTime();
+    if (Number.isFinite(msFromTime)) return msFromTime;
+  }
+  return 0;
+}
+
 function sortMergedByDateThenId(rows) {
   return [...rows].sort((a, b) => {
     const da = toYmd(a.date);
     const db = toYmd(b.date);
     if (da !== db) return da.localeCompare(db);
-    const ta = String(a.transactionTime || '00:00:00');
-    const tb = String(b.transactionTime || '00:00:00');
-    if (ta !== tb) return ta.localeCompare(tb);
-    const ida = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
-    const idb = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
+    const aOrderMs = getOrderTimestampMs(a);
+    const bOrderMs = getOrderTimestampMs(b);
+    if (aOrderMs !== bOrderMs) return aOrderMs - bOrderMs;
+    const ida = numericSortIdValue(a);
+    const idb = numericSortIdValue(b);
     if (ida !== idb) return ida - idb;
-    return String(a.id).localeCompare(String(b.id));
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
   });
+}
+
+function numericSortIdValue(row) {
+  if (!row) return Number.MAX_SAFE_INTEGER;
+  if (typeof row.id === 'number' && Number.isFinite(row.id)) return row.id;
+  if (row.pdcId != null) {
+    const n = Number(row.pdcId);
+    if (Number.isFinite(n)) return n;
+  }
+  if (typeof row.id === 'string') {
+    const m = /^pdc-due-(\d+)$/i.exec(row.id);
+    if (m) return parseInt(m[1], 10);
+    const n = parseInt(row.id, 10);
+    if (Number.isFinite(n)) return n;
+  }
+  return Number.MAX_SAFE_INTEGER;
 }
 
 // Get account summary
@@ -96,7 +138,8 @@ router.get('/', authenticateToken, async (req, res) => {
         DATE_FORMAT(pdc.cheque_date, '%Y-%m-%d') AS cheque_date_ymd,
         pdc.amount,
         pdc.pdc_type,
-        COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved
+        COALESCE(pdc.daily_ledger_approved, 0) AS daily_ledger_approved,
+        pdc.daily_ledger_approved_at
       FROM post_dated_cheques pdc
       WHERE (
         (pdc.cheque_date <= CURDATE() AND pdc.pdc_type IN ('GCEC PDC', 'Customer PDC', 'Custom PDC'))
@@ -104,7 +147,7 @@ router.get('/', authenticateToken, async (req, res) => {
         (
           pdc.pdc_type = 'GCEC PDC'
           AND pdc.cheque_date > CURDATE()
-          AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+          AND pdc.cheque_date <= DATE_ADD(CURDATE(), INTERVAL 15 DAY)
         )
       )
       AND UPPER(TRIM(COALESCE(pdc.cheque_type, ''))) <> 'SECURITY CHEQUE'
@@ -118,7 +161,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const isCustomerPdc = isCustomerPdcType(pdc.pdc_type);
         const ledgerApproved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
         const shouldAffectBalance = isCustomerPdc
-          ? ledgerApproved
+          ? true
           : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
         const todayYmd = toYmd(new Date());
         // GCEC PDC: always debit in ledger display (including upcoming). Customer PDC: always credit.
@@ -126,13 +169,24 @@ router.get('/', authenticateToken, async (req, res) => {
         return {
           id: `pdc-due-${pdc.id}`,
           date: rowDate,
+          transactionTime:
+            isCustomerPdc && ledgerApproved
+              ? formatTimeForDisplay(pdc.daily_ledger_approved_at) || '09:00:00'
+              : isCustomerPdc
+                ? '09:00:00'
+                : '00:00:00',
           debit: isCredit ? null : formatAmount(pdc.amount),
           credit: isCredit ? formatAmount(pdc.amount) : null,
           affectsBalance: shouldAffectBalance,
-          remarks: pdc.pdc_type || null
+          remarks: pdc.pdc_type || null,
+          pdcType: pdc.pdc_type,
+          dailyLedgerApproved: ledgerApproved,
+          dailyLedgerApprovedAt: pdc.daily_ledger_approved_at || null
         };
       })
-      .filter((row) => toYmd(row.date) <= todayYmd);
+      // Keep matured rows for every day, plus upcoming GCEC PDC (already capped to +15 days by SQL)
+      // so its forecasted debit shows up in the running balance.
+      .filter((row) => toYmd(row.date) <= todayYmd || isGcecPdcType(row.pdcType));
 
     const rowsForRunningBalance = sortMergedByDateThenId([...dailyRows, ...maturedOrTodayPdcRows]);
     if (rowsForRunningBalance.length > 0) {
@@ -178,15 +232,23 @@ router.get('/', authenticateToken, async (req, res) => {
     const totalCredit = formatAmount(totalCreditAmount);
     const totalDebit = formatAmount(totalDebitAmount);
 
+    // Available Balance is explicitly the recomputed balance of the most recent
+    // ledger row (on or before asOfDate) whose remarks read "Available Balance".
+    // We use the running-balance value so the figure stays consistent with the
+    // current effects of approved Customer PDCs and matured/upcoming GCEC PDCs.
     const availableBalanceRows = rowsForRunningBalance.filter((row) => {
-      const remarks = String(row.remarks || '').trim().toLowerCase();
+      if (!row || !row.remarks) return false;
       const txnDate = toYmd(row.date);
-      return remarks === 'available balance' && txnDate <= asOfDate;
+      if (txnDate > asOfDate) return false;
+      return String(row.remarks).trim().toLowerCase() === 'available balance';
     });
-    const latestAvailableBalance =
-      availableBalanceRows.length > 0 ? availableBalanceRows[availableBalanceRows.length - 1].balance : null;
-    const mainAvailableBalance =
-      latestAvailableBalance != null ? formatAmount(latestAvailableBalance) : "0.00";
+    const latestAvailableBalanceRow =
+      availableBalanceRows.length > 0
+        ? availableBalanceRows[availableBalanceRows.length - 1]
+        : null;
+    const mainAvailableBalance = latestAvailableBalanceRow
+      ? formatAmount(latestAvailableBalanceRow.balance)
+      : totalBalance;
     const availableBalance = mainAvailableBalance;
 
     const statementTotals = null;

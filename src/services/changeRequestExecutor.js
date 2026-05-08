@@ -129,7 +129,10 @@ async function executeApprovedRequest(reqRow) {
     if (action === 'delete') {
       if (row.attachment_cloudinary_public_id) {
         try {
-          await destroyPdcChequeImage(row.attachment_cloudinary_public_id);
+          await destroyPdcChequeImage(
+            row.attachment_cloudinary_public_id,
+            row.attachment_resource_type || 'image'
+          );
         } catch (e) {
           console.error('destroyPdcChequeImage on approved delete:', e.message);
         }

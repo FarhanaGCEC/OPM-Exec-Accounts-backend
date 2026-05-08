@@ -58,6 +58,7 @@ class PDC {
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,
+          pdc.attachment_resource_type,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,
@@ -97,6 +98,7 @@ class PDC {
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,
+          pdc.attachment_resource_type,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,
@@ -138,7 +140,7 @@ class PDC {
       );
       const fetchResult = await pool.query(
         `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
-          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, attachment_resource_type, created_by, created_at, updated_at
           FROM post_dated_cheques WHERE id = LAST_INSERT_ID()`
       );
 
@@ -192,7 +194,7 @@ class PDC {
 
       const fetchResult = await pool.query(
         `SELECT id, cheque_date, cheque_number, customer_name, amount, cheque_type, pdc_type, description,
-          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, created_by, created_at, updated_at
+          daily_ledger_approved, daily_ledger_approved_at, attachment_name, attachment_url, attachment_cloudinary_public_id, attachment_resource_type, created_by, created_at, updated_at
           FROM post_dated_cheques WHERE id = ?`,
         [id]
       );
@@ -243,14 +245,41 @@ class PDC {
     }
   }
 
-  /** Set cheque scan (Cloudinary); does not alter other fields */
-  static async setChequeAttachment(id, { attachmentName, attachmentUrl, attachmentCloudinaryPublicId }) {
+  /** Update the approval timestamp used to place approved Customer PDC rows in the ledger. */
+  static async setDailyLedgerApprovedAt(id, approvedAt) {
     try {
       const updateResult = await pool.query(
         `UPDATE post_dated_cheques 
-         SET attachment_name = ?, attachment_url = ?, attachment_cloudinary_public_id = ?, updated_at = CURRENT_TIMESTAMP
+         SET daily_ledger_approved_at = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [attachmentName, attachmentUrl, attachmentCloudinaryPublicId, id]
+        [approvedAt, id]
+      );
+      if (updateResult.affectedRows === 0) {
+        return null;
+      }
+      return await this.getById(id);
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /** Set cheque scan/PDF (Cloudinary); does not alter other fields */
+  static async setChequeAttachment(
+    id,
+    { attachmentName, attachmentUrl, attachmentCloudinaryPublicId, attachmentResourceType }
+  ) {
+    try {
+      const updateResult = await pool.query(
+        `UPDATE post_dated_cheques 
+         SET attachment_name = ?, attachment_url = ?, attachment_cloudinary_public_id = ?, attachment_resource_type = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          attachmentName,
+          attachmentUrl,
+          attachmentCloudinaryPublicId,
+          attachmentResourceType || 'image',
+          id
+        ]
       );
       if (updateResult.affectedRows === 0) {
         return null;
@@ -299,6 +328,7 @@ class PDC {
           pdc.attachment_name,
           pdc.attachment_url,
           pdc.attachment_cloudinary_public_id,
+          pdc.attachment_resource_type,
           pdc.created_by,
           u.username as created_by_username,
           pdc.created_at,
