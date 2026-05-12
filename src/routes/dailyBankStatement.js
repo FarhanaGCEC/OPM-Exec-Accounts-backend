@@ -11,6 +11,26 @@ const { parseStatementTotalsFromPdfBuffer, parseStatementTotalsFromPdfPath } = r
 const router = express.Router();
 
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'daily-bank-statements');
+const VALID_CURRENCIES = new Set(['AED', 'USD', 'GBP']);
+
+function normalizeCurrency(value) {
+  return String(value || '').toUpperCase().trim();
+}
+
+function resolveCurrency(req) {
+  const fromQuery = normalizeCurrency(req.query?.currency);
+  if (fromQuery) return fromQuery;
+  const fromBody = normalizeCurrency(req.body?.currency);
+  if (fromBody) return fromBody;
+  return 'AED';
+}
+
+function validateCurrency(currency) {
+  if (!VALID_CURRENCIES.has(currency)) {
+    return 'currency must be one of AED, USD, GBP';
+  }
+  return null;
+}
 
 function sanitizeFilename(name) {
   return String(name || 'statement.pdf')
@@ -31,8 +51,10 @@ async function removeFileIfExists(filePath) {
 
 function formatResponse(record) {
   if (!record) return null;
+  const currency = normalizeCurrency(record.currency) || 'AED';
   return {
     id: record.id,
+    currency,
     original_filename: record.original_filename,
     stored_filename: record.stored_filename,
     mime_type: record.mime_type,
@@ -40,7 +62,7 @@ function formatResponse(record) {
     uploaded_by: record.uploaded_by,
     uploaded_at: record.uploaded_at,
     updated_at: record.updated_at,
-    download_url: '/api/daily-bank-statement/file'
+    download_url: `/api/daily-bank-statement/file?currency=${currency}`
   };
 }
 
@@ -61,9 +83,15 @@ function getExtractedTotalsFromRecord(record) {
   return hasExtractedAmounts(extracted) ? extracted : null;
 }
 
-router.get('/', authenticateToken, async (_req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
-    const current = await DailyBankStatement.getCurrent();
+    const currency = resolveCurrency(req);
+    const currencyError = validateCurrency(currency);
+    if (currencyError) {
+      return res.status(400).json({ success: false, error: currencyError });
+    }
+
+    const current = await DailyBankStatement.getCurrent(currency);
     let extractedTotals = getExtractedTotalsFromRecord(current);
     if (!extractedTotals) {
       const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
@@ -91,9 +119,15 @@ router.get('/', authenticateToken, async (_req, res) => {
   }
 });
 
-router.get('/file', authenticateTokenOrQuery, async (_req, res) => {
+router.get('/file', authenticateTokenOrQuery, async (req, res) => {
   try {
-    const current = await DailyBankStatement.getCurrent();
+    const currency = resolveCurrency(req);
+    const currencyError = validateCurrency(currency);
+    if (currencyError) {
+      return res.status(400).json({ success: false, error: currencyError });
+    }
+
+    const current = await DailyBankStatement.getCurrent(currency);
     if (!current) {
       return res.status(404).json({
         success: false,
@@ -151,6 +185,12 @@ router.post(
   async (req, res) => {
   let newFilePath;
   try {
+    const currency = resolveCurrency(req);
+    const currencyError = validateCurrency(currency);
+    if (currencyError) {
+      return res.status(400).json({ success: false, error: currencyError });
+    }
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -158,11 +198,12 @@ router.post(
       });
     }
 
-    await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+    const currencyUploadDir = path.join(UPLOAD_DIR, currency);
+    await fs.promises.mkdir(currencyUploadDir, { recursive: true });
 
     const safeOriginal = sanitizeFilename(req.file.originalname || 'daily-bank-statement.pdf');
     const storedFilename = `${Date.now()}-${safeOriginal}`;
-    newFilePath = path.join(UPLOAD_DIR, storedFilename);
+    newFilePath = path.join(currencyUploadDir, storedFilename);
 
     await fs.promises.writeFile(newFilePath, req.file.buffer);
 
@@ -174,8 +215,9 @@ router.post(
       console.error('Failed to parse uploaded daily bank statement PDF during upload:', parseError.message);
     }
 
-    const previous = await DailyBankStatement.getCurrent();
+    const previous = await DailyBankStatement.getCurrent(currency);
     const saved = await DailyBankStatement.upsert({
+      currency,
       originalFilename: safeOriginal,
       storedFilename,
       filePath: newFilePath,
@@ -211,9 +253,15 @@ router.post(
   }
 });
 
-router.get('/extracted-totals', authenticateToken, async (_req, res) => {
+router.get('/extracted-totals', authenticateToken, async (req, res) => {
   try {
-    const current = await DailyBankStatement.getCurrent();
+    const currency = resolveCurrency(req);
+    const currencyError = validateCurrency(currency);
+    if (currencyError) {
+      return res.status(400).json({ success: false, error: currencyError });
+    }
+
+    const current = await DailyBankStatement.getCurrent(currency);
     if (!current) {
       return res.status(404).json({
         success: false,
@@ -268,9 +316,15 @@ router.delete(
   '/',
   authenticateToken,
   authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
-  async (_req, res) => {
+  async (req, res) => {
   try {
-    const current = await DailyBankStatement.getCurrent();
+    const currency = resolveCurrency(req);
+    const currencyError = validateCurrency(currency);
+    if (currencyError) {
+      return res.status(400).json({ success: false, error: currencyError });
+    }
+
+    const current = await DailyBankStatement.getCurrent(currency);
     if (!current) {
       return res.status(404).json({
         success: false,
@@ -278,7 +332,7 @@ router.delete(
       });
     }
 
-    await DailyBankStatement.clear();
+    await DailyBankStatement.clear(currency);
     await removeFileIfExists(current.file_path);
 
     return res.json({
