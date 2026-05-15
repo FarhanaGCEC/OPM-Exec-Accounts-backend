@@ -13,6 +13,32 @@ const UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'monthly-bank-statements'
 const VALID_CURRENCIES = new Set(['AED', 'USD', 'GBP']);
 const VALID_FILE_TYPES = new Set(['bank_statement', 'monthly_invoice']);
 
+function getAllowedMonthlyStatementRoots() {
+  const cwd = process.cwd();
+  const parent = path.dirname(cwd);
+  const baseDirs = [
+    cwd,
+    parent,
+    path.join(cwd, 'build'),
+    path.join(parent, 'build'),
+    path.join(cwd, 'uploads'),
+    path.join(parent, 'uploads')
+  ];
+  const roots = new Set();
+  for (const baseDir of baseDirs) {
+    roots.add(path.resolve(path.join(baseDir, 'monthly-bank-statements')));
+    roots.add(path.resolve(path.join(baseDir, 'uploads', 'monthly-bank-statements')));
+    roots.add(path.resolve(path.join(baseDir, 'build', 'monthly-bank-statements')));
+    roots.add(path.resolve(path.join(baseDir, 'build', 'uploads', 'monthly-bank-statements')));
+  }
+  return Array.from(roots);
+}
+
+function isAllowedMonthlyStatementPath(absolutePath) {
+  const resolved = path.resolve(absolutePath);
+  return getAllowedMonthlyStatementRoots().some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+}
+
 function sanitizeFilename(name) {
   return String(name || 'document.pdf')
     .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -100,10 +126,13 @@ router.get('/file/:type', authenticateTokenOrQuery, async (req, res) => {
       ? (record.bank_statement_original_filename || record.bank_statement_stored_filename)
       : (record.monthly_invoice_original_filename || record.monthly_invoice_stored_filename);
 
-    const absolutePath = path.resolve(filePath);
-    if (!absolutePath.startsWith(path.resolve(UPLOAD_DIR))) return res.status(400).json({ success: false, error: 'Invalid file path' });
+    const readablePath = await MonthlyBankStatement.resolveReadableFilePath(record, fileType);
+    if (!readablePath) return res.status(404).json({ success: false, error: 'PDF file not found on server' });
 
-    await fs.promises.access(absolutePath, fs.constants.F_OK);
+    const absolutePath = path.resolve(readablePath);
+    if (!isAllowedMonthlyStatementPath(absolutePath)) {
+      return res.status(400).json({ success: false, error: 'Invalid file path' });
+    }
     const viewName = downloadName || 'monthly-bank-statement.pdf';
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);

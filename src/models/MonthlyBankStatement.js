@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { pool } = require('../config/database');
 
 const EMPTY_BANK_STATEMENT = {
@@ -220,6 +222,63 @@ class MonthlyBankStatement {
     );
 
     return this.getOne({ monthPeriod, currency });
+  }
+
+  static async resolveReadableFilePath(record, fileType) {
+    if (!record) return null;
+
+    const isBankStatement = fileType === 'bank_statement';
+    const filePath = isBankStatement ? record.bank_statement_file_path : record.monthly_invoice_file_path;
+    const storedFilename = isBankStatement
+      ? record.bank_statement_stored_filename
+      : record.monthly_invoice_stored_filename;
+    const currency = String(record.currency || '').trim();
+    const monthPeriod = String(record.month_period || '').trim();
+    const basenameFromPath = filePath ? path.basename(filePath) : null;
+    const filename = storedFilename || basenameFromPath;
+    const cwd = process.cwd();
+    const parent = path.dirname(cwd);
+    const baseDirs = [
+      cwd,
+      parent,
+      path.join(cwd, 'build'),
+      path.join(parent, 'build'),
+      path.join(cwd, 'uploads'),
+      path.join(parent, 'uploads')
+    ];
+
+    const dirCandidates = [];
+    for (const baseDir of baseDirs) {
+      const roots = [
+        path.join(baseDir, 'monthly-bank-statements'),
+        path.join(baseDir, 'uploads', 'monthly-bank-statements'),
+        path.join(baseDir, 'build', 'monthly-bank-statements'),
+        path.join(baseDir, 'build', 'uploads', 'monthly-bank-statements')
+      ];
+      for (const root of roots) {
+        if (currency && monthPeriod) {
+          dirCandidates.push(path.join(root, currency, monthPeriod));
+        }
+        dirCandidates.push(root);
+      }
+    }
+
+    const uniqueDirs = Array.from(new Set(dirCandidates));
+    const candidates = [
+      filePath,
+      ...(filename ? uniqueDirs.map((dir) => path.join(dir, filename)) : [])
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      try {
+        await fs.promises.access(candidate, fs.constants.F_OK);
+        return candidate;
+      } catch (_error) {
+        // Try next candidate path.
+      }
+    }
+
+    return null;
   }
 }
 

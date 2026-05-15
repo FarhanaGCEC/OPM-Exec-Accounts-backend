@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const sessionManager = require('../services/sessionManager');
 const User = require('../models/User');
 const { USER_ROLES } = require('../constants/roles');
+const { isViewerCreditCardApiPath } = require('../utils/viewerCreditCardAccess');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
@@ -13,9 +14,13 @@ function isReadOnlyMethod(method) {
 function enforceViewerReadOnly(req, res) {
   const role = req.user && req.user.role;
   if (role === USER_ROLES.VIEWER && !isReadOnlyMethod(req.method)) {
+    if (isViewerCreditCardApiPath(req)) {
+      return true;
+    }
     res.status(403).json({
       success: false,
-      error: 'Viewer role is read-only. Add, edit, and delete actions are not allowed.',
+      error:
+        'Viewer role is read-only outside Credit Cards. Statements, payments, and card details can be changed.',
       code: 'VIEWER_READ_ONLY',
     });
     return false;

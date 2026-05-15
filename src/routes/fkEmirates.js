@@ -45,7 +45,7 @@ function formatEmiratesCreatedRow(transaction) {
   return {
     id: transaction.id,
     accountNumber: transaction.account_number || null,
-    date: transaction.date,
+    date: normalizeEmiratesDateInput(transaction.date),
     description: transaction.description,
     details: transaction.details || null,
     currency: transaction.currency || 'AED',
@@ -61,6 +61,7 @@ function formatEmiratesCreatedRow(transaction) {
 
 /** Normalize date to YYYY-MM-DD (same rules as POST /). */
 function normalizeEmiratesDateInput(date) {
+  if (date == null) return date;
   if (date instanceof Date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -71,6 +72,9 @@ function normalizeEmiratesDateInput(date) {
     if (date.includes('/')) {
       const [day, month, year] = date.split('/');
       return `${year}-${month}-${day}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(date)) {
+      return date.slice(0, 10);
     }
     return date;
   }
@@ -89,7 +93,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const formattedTransactions = transactions.map(txn => ({
       id: txn.id,
       accountNumber: txn.account_number || null,
-      date: txn.date,
+      date: normalizeEmiratesDateInput(txn.date),
       description: txn.description,
       details: txn.details || null,
       currency: txn.currency || 'AED',
@@ -594,7 +598,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       data: {
         id: transaction.id,
         accountNumber: transaction.account_number || null,
-        date: transaction.date,
+        date: normalizeEmiratesDateInput(transaction.date),
         description: transaction.description,
         details: transaction.details || null,
         currency: transaction.currency || 'AED',
@@ -685,25 +689,7 @@ router.post('/', authenticateToken, async (req, res) => {
       });
     }
 
-    // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
-    let formattedDate = date;
-    
-    // Convert Date object to string if needed
-    if (date instanceof Date) {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      formattedDate = `${year}-${month}-${day}`;
-    } else if (typeof date === 'string') {
-      // If it's already in YYYY-MM-DD format, use as is
-      if (date.includes('/')) {
-        const [day, month, year] = date.split('/');
-        formattedDate = `${year}-${month}-${day}`;
-      } else {
-        // Already in YYYY-MM-DD format
-        formattedDate = date;
-      }
-    }
+    const formattedDate = normalizeEmiratesDateInput(date);
 
     // Get user ID from JWT token
     const createdBy = req.user ? req.user.id : null;
@@ -726,7 +712,7 @@ router.post('/', authenticateToken, async (req, res) => {
       data: {
         id: transaction.id,
         accountNumber: transaction.account_number || null,
-        date: transaction.date,
+        date: normalizeEmiratesDateInput(transaction.date),
         description: transaction.description,
         details: transaction.details || null,
         currency: transaction.currency || 'AED',
@@ -840,25 +826,7 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       });
     }
 
-    // Convert date format if needed (DD/MM/YYYY to YYYY-MM-DD)
-    let formattedDate = finalDate;
-    
-    // Convert Date object to string if needed
-    if (finalDate instanceof Date) {
-      const year = finalDate.getFullYear();
-      const month = String(finalDate.getMonth() + 1).padStart(2, '0');
-      const day = String(finalDate.getDate()).padStart(2, '0');
-      formattedDate = `${year}-${month}-${day}`;
-    } else if (typeof finalDate === 'string') {
-      // If it's already in YYYY-MM-DD format, use as is
-      if (finalDate.includes('/')) {
-        const [day, month, year] = finalDate.split('/');
-        formattedDate = `${year}-${month}-${day}`;
-      } else {
-        // Already in YYYY-MM-DD format
-        formattedDate = finalDate;
-      }
-    }
+    const formattedDate = normalizeEmiratesDateInput(finalDate);
 
     const transaction = await EmiratesTransaction.update(id, {
       accountNumber: finalAccountNumber || null,
@@ -884,7 +852,7 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       data: {
         id: transaction.id,
         accountNumber: transaction.account_number || null,
-        date: transaction.date,
+        date: normalizeEmiratesDateInput(transaction.date),
         description: transaction.description,
         details: transaction.details || null,
         currency: transaction.currency || 'AED',

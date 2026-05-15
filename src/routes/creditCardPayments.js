@@ -1,7 +1,13 @@
 const express = require('express');
 const CreditCardPayment = require('../models/CreditCardPayment');
 const { authenticateToken } = require('../middleware/auth');
-const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const { USER_ROLES } = require('../constants/roles');
+const changeRequestEvents = require('../services/changeRequestEvents');
+const {
+  queueCreditCardPaymentDelete,
+  queueCreditCardPaymentPut,
+  queueCreditCardPaymentPatch,
+} = require('../controllers/creditCardPaymentChangeRequestQueue');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
 const router = express.Router();
@@ -98,8 +104,27 @@ router.get('/:id', authenticateToken, async (req, res) => {
   }
 });
 
+function notifyAdminPaymentCreated(req, payment) {
+  if (!req.user || req.user.role !== USER_ROLES.USER) return;
+  changeRequestEvents.emit('new_request', {
+    requestId: null,
+    action: 'create',
+    resourceType: 'credit_card_payment',
+    resourceId: String(payment.id),
+    requesterId: req.user.id,
+    requesterUsername: req.user.username,
+    note: null,
+    status: 'recorded',
+    summary: {
+      payment_date: payment.payment_date,
+      amount: payment.amount,
+      paid_against: payment.paid_against || null,
+    },
+  });
+}
+
 // Create a new credit card payment
-router.post('/', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.post('/', authenticateToken, async (req, res) => {
   try {
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
 
@@ -174,6 +199,8 @@ router.post('/', authenticateToken, requireElevatedForMutation, async (req, res)
       createdBy: createdBy
     });
 
+    notifyAdminPaymentCreated(req, payment);
+
     res.status(201).json({
       success: true,
       message: 'Credit card payment created successfully',
@@ -189,7 +216,10 @@ router.post('/', authenticateToken, requireElevatedForMutation, async (req, res)
 });
 
 // Update a credit card payment (full update)
-router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queueCreditCardPaymentPut(req, res);
+  }
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
@@ -290,7 +320,10 @@ router.put('/:id', authenticateToken, requireElevatedForMutation, async (req, re
 });
 
 // Partial update a credit card payment
-router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.patch('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queueCreditCardPaymentPatch(req, res);
+  }
   try {
     const { id } = req.params;
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
@@ -391,7 +424,10 @@ router.patch('/:id', authenticateToken, requireElevatedForMutation, async (req, 
 });
 
 // Delete a credit card payment
-router.delete('/:id', authenticateToken, requireElevatedForMutation, async (req, res) => {
+router.delete('/:id', authenticateToken, async (req, res) => {
+  if (req.user && req.user.role === USER_ROLES.USER) {
+    return queueCreditCardPaymentDelete(req, res);
+  }
   try {
     const { id } = req.params;
     const deleted = await CreditCardPayment.delete(id);

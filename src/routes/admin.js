@@ -29,6 +29,8 @@ function requireBootstrapSecret(req, res, next) {
 }
 
 router.get('/users', ...adminOnly, adminController.listUsers);
+router.put('/users/:id', ...adminOnly, adminController.updateUser);
+router.patch('/users/:id', ...adminOnly, adminController.updateUser);
 router.get(
   '/users/:id/sidebar-permissions',
   ...adminOnly,

@@ -66,8 +66,15 @@ async function approveChangeRequest(req, res) {
 
   try {
     const row = await ChangeRequest.findById(id);
-    if (!row || row.status !== 'pending') {
-      return res.status(404).json({ error: 'Pending request not found' });
+    if (!row) {
+      return res.status(404).json({ error: 'Change request not found' });
+    }
+    if (row.status !== 'pending') {
+      return res.status(409).json({
+        error: `This request was already ${row.status}`,
+        status: row.status,
+        request: row,
+      });
     }
 
     await executeApprovedRequest({
@@ -84,13 +91,33 @@ async function approveChangeRequest(req, res) {
       reviewNote,
     });
 
+    const closedDuplicateRequestIds = await ChangeRequest.rejectOtherPending({
+      resourceType: row.resourceType,
+      resourceId: row.resourceId,
+      exceptId: id,
+      reviewedBy: req.user.id,
+      reviewNote: `Closed: request #${id} was approved`,
+    });
+
     changeRequestEvents.emit('request_resolved', {
       requestId: id,
       status: 'approved',
       reviewedBy: req.user.id,
     });
+    for (const closedId of closedDuplicateRequestIds) {
+      changeRequestEvents.emit('request_resolved', {
+        requestId: closedId,
+        status: 'rejected',
+        reviewedBy: req.user.id,
+        reason: 'superseded',
+      });
+    }
 
-    return res.json({ message: 'Approved and applied', request: updated });
+    return res.json({
+      message: 'Approved and applied',
+      request: updated,
+      closedDuplicateRequestIds,
+    });
   } catch (error) {
     console.error('approveChangeRequest:', error);
     const msg = error && error.message ? String(error.message) : 'Could not apply request';
@@ -113,8 +140,15 @@ async function rejectChangeRequest(req, res) {
 
   try {
     const row = await ChangeRequest.findById(id);
-    if (!row || row.status !== 'pending') {
-      return res.status(404).json({ error: 'Pending request not found' });
+    if (!row) {
+      return res.status(404).json({ error: 'Change request not found' });
+    }
+    if (row.status !== 'pending') {
+      return res.status(409).json({
+        error: `This request was already ${row.status}`,
+        status: row.status,
+        request: row,
+      });
     }
 
     const updated = await ChangeRequest.setReviewed(id, {

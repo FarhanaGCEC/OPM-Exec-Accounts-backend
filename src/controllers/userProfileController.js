@@ -29,6 +29,18 @@ async function getProfile(req, res) {
           'PATCH/PUT/POST /api/statements/:id (JSON, with Credit Cards permission) returns 202 and creates a pending change request; data is unchanged until admin approves.',
       };
     }
+    if (user.role === USER_ROLES.VIEWER) {
+      payload.user.creditCardMutationPolicy = {
+        directMutationsAllowed: true,
+        scopes: [
+          '/api/statements',
+          '/api/credit-card-payments',
+          '/api/cards',
+          '/api/credit-cards',
+        ],
+        hint: 'Viewer can add, edit, and delete on Credit Cards Statements, Payments, and Details only. Other modules remain read-only.',
+      };
+    }
     return res.json(payload);
   } catch (error) {
     console.error('getProfile:', error);

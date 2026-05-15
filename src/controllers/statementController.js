@@ -14,7 +14,8 @@ const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
 } = require('../utils/attachmentPayload');
-const { USER_ROLES, isElevatedUserRole } = require('../constants/roles');
+const { USER_ROLES } = require('../constants/roles');
+const { canDirectMutateCreditCardResources } = require('../utils/viewerCreditCardAccess');
 const {
   normalizeStatementAmount,
   parseStatementDateInput,
@@ -414,7 +415,7 @@ class StatementController {
   static async updateStatement(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!isElevatedUserRole(role)) {
+      if (!canDirectMutateCreditCardResources(role, req)) {
         if (role === USER_ROLES.USER) {
           const { queueStatementFieldChange } = require('./statementChangeRequestQueue');
           return queueStatementFieldChange(req, res);
@@ -867,7 +868,7 @@ class StatementController {
   static async uploadStatementAttachment(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!isElevatedUserRole(role)) {
+      if (!canDirectMutateCreditCardResources(role, req)) {
         return res.status(400).json({
           success: false,
           code: role === USER_ROLES.USER ? 'APPROVAL_REQUIRED' : 'FORBIDDEN_ROLE',
@@ -1036,7 +1037,7 @@ class StatementController {
   static async deleteStatementAttachment(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!isElevatedUserRole(role)) {
+      if (!canDirectMutateCreditCardResources(role, req)) {
         if (role === USER_ROLES.USER) {
           const { queueStatementAttachmentRemoval } = require('./statementChangeRequestQueue');
           return queueStatementAttachmentRemoval(req, res);

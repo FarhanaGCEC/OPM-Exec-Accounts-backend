@@ -10,6 +10,15 @@ function parsePayload(row) {
   }
 }
 
+function normalizeResourceType(resourceType) {
+  if (resourceType === 'pdc') return 'post_dated_cheque';
+  return resourceType;
+}
+
+function normalizeResourceId(resourceId) {
+  return String(resourceId);
+}
+
 function mapRow(row) {
   if (!row) return null;
   return {
@@ -52,7 +61,49 @@ class ChangeRequest {
     if (!insertResult.insertId) {
       throw new Error('Failed to create change request');
     }
-    return this.findById(insertResult.insertId);
+    const newId = insertResult.insertId;
+    await this.rejectOtherPending({
+      resourceType,
+      resourceId,
+      exceptId: newId,
+      reviewedBy: null,
+      reviewNote: `Superseded by newer request #${newId}`,
+    });
+    return this.findById(newId);
+  }
+
+  /**
+   * Reject all other pending requests for the same resource (duplicate edit/delete queue).
+   * Returns ids that were closed.
+   */
+  static async rejectOtherPending({
+    resourceType,
+    resourceId,
+    exceptId,
+    reviewedBy,
+    reviewNote,
+  }) {
+    const rt = normalizeResourceType(resourceType);
+    const rid = normalizeResourceId(resourceId);
+    const except = Number(exceptId);
+
+    const pending = await pool.query(
+      `SELECT id FROM change_requests
+       WHERE resource_type = ? AND resource_id = ? AND status = 'pending' AND id != ?`,
+      [rt, rid, except]
+    );
+    if (!pending.rows.length) {
+      return [];
+    }
+
+    await pool.query(
+      `UPDATE change_requests
+       SET status = 'rejected', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, review_note = ?
+       WHERE resource_type = ? AND resource_id = ? AND status = 'pending' AND id != ?`,
+      [reviewedBy ?? null, reviewNote || null, rt, rid, except]
+    );
+
+    return pending.rows.map((r) => r.id);
   }
 
   static async findById(id) {

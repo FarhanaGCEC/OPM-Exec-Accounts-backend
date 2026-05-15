@@ -46,7 +46,7 @@ class EmiratesTransaction {
         SELECT 
           t.id,
           t.account_number,
-          t.date,
+          DATE_FORMAT(t.date, '%Y-%m-%d') AS date,
           t.description,
           t.details,
           t.currency,
@@ -80,7 +80,7 @@ class EmiratesTransaction {
         SELECT 
           t.id,
           t.account_number,
-          t.date,
+          DATE_FORMAT(t.date, '%Y-%m-%d') AS date,
           t.description,
           t.details,
           t.currency,
@@ -207,7 +207,7 @@ class EmiratesTransaction {
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, account_number, date, description, details, currency, debit, bank_charges, credit, balance, created_by, created_at FROM emirates_transactions WHERE id = ?',
+        `SELECT id, account_number, DATE_FORMAT(date, '%Y-%m-%d') AS date, description, details, currency, debit, bank_charges, credit, balance, created_by, created_at FROM emirates_transactions WHERE id = ?`,
         [insertedId]
       );
       const transaction = fetchResult.rows[0];

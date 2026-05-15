@@ -79,7 +79,7 @@ function rejectUsernameMutation(body, res) {
   }
   res.status(400).json({
     error: 'Username cannot be changed after the account is created',
-    hint: 'Only password and role can be updated for an existing user.',
+    hint: 'Username cannot be changed. Use PUT /api/admin/users/:id with password, role, and/or sidebarPermissions.',
   });
   return true;
 }
@@ -313,6 +313,120 @@ async function getUserSidebarPermissions(req, res) {
   }
 }
 
+/**
+ * Update an existing user: optional password, role, and sidebar permissions (role "user" only).
+ * PUT/PATCH /api/admin/users/:id
+ */
+async function updateUser(req, res) {
+  const id = parseInt(req.params.id, 10);
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'Invalid user id' });
+  }
+  if (rejectUsernameMutation(body, res)) return;
+
+  const passwordRaw = body.password !== undefined ? body.password : body.Password;
+  const hasPassword = passwordRaw !== undefined && passwordRaw !== null && String(passwordRaw).trim() !== '';
+  const hasRole = body.role !== undefined && body.role !== null && String(body.role).trim() !== '';
+  const roleRaw = hasRole ? String(body.role).trim().toLowerCase() : null;
+  const permBody =
+    body.permissions !== undefined
+      ? body.permissions
+      : body.sidebarPermissions !== undefined
+        ? body.sidebarPermissions
+        : undefined;
+  const hasPerms = permBody !== undefined;
+
+  if (!hasPassword && !hasRole && !hasPerms) {
+    return res.status(400).json({
+      error: 'Nothing to update',
+      hint: 'Send at least one of: password, role, sidebarPermissions (or permissions).',
+    });
+  }
+
+  if (hasPassword && String(passwordRaw).length < 6) {
+    return res.status(400).json({
+      error: 'Password must be at least 6 characters long',
+    });
+  }
+  if (hasRole && !isValidUserRole(roleRaw)) {
+    return res.status(400).json({
+      error: 'Invalid role',
+      allowed: ['admin', 'accountant', 'user', 'viewer'],
+    });
+  }
+
+  try {
+    const existing = await User.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (
+      hasRole &&
+      existing.role === USER_ROLES.ADMIN &&
+      roleRaw !== USER_ROLES.ADMIN
+    ) {
+      const adminCount = await User.countByRole(USER_ROLES.ADMIN);
+      if (adminCount <= 1) {
+        return res.status(400).json({ error: 'Cannot change role of the only admin user' });
+      }
+    }
+
+    const updatedFields = [];
+
+    if (hasPassword) {
+      const hashedPassword = await bcrypt.hash(String(passwordRaw), 10);
+      await User.updatePassword(id, hashedPassword);
+      updatedFields.push('password');
+    }
+
+    let effectiveRole = existing.role || USER_ROLES.USER;
+    if (hasRole) {
+      await User.updateRole(id, roleRaw);
+      effectiveRole = roleRaw;
+      updatedFields.push('role');
+    }
+
+    if (hasPerms) {
+      if (effectiveRole !== USER_ROLES.USER) {
+        return res.status(400).json({
+          error:
+            'Sidebar permissions can only be set for standard users (role "user"). Change role to "user" first, or omit sidebarPermissions.',
+        });
+      }
+      const normalized = normalizePermissionsInput(permBody);
+      await User.updateSidebarPermissions(id, normalized);
+      updatedFields.push('sidebarPermissions');
+    }
+
+    const updated = await User.findById(id);
+    return res.json({
+      success: true,
+      message: 'User updated successfully',
+      updatedFields,
+      user: {
+        id: updated.id,
+        username: updated.username,
+        role: updated.role,
+        createdAt: updated.createdAt,
+        sidebarPermissions: effectiveSidebarPermissions(
+          updated.role,
+          updated.sidebarPermissionsStored
+        ),
+        sidebarPermissionsStored:
+          updated.role === USER_ROLES.USER
+            ? normalizePermissionsInput(updated.sidebarPermissionsStored)
+            : null,
+      },
+    });
+  } catch (error) {
+    console.error('updateUser:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
 async function updateUserSidebarPermissions(req, res) {
   const id = parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id < 1) {
@@ -358,6 +472,7 @@ async function updateUserSidebarPermissions(req, res) {
 
 module.exports = {
   createUser,
+  updateUser,
   updatePassword,
   updateUserRole,
   deleteUser,

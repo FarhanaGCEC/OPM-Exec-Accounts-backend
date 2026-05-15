@@ -3,6 +3,7 @@ const ChangeRequest = require('../models/ChangeRequest');
 const PayablesCategory = require('../models/PayablesCategory');
 const ReceivablesCategory = require('../models/ReceivablesCategory');
 const PurchaseBill = require('../models/PurchaseBill');
+const CreditCardPayment = require('../models/CreditCardPayment');
 const changeRequestEvents = require('../services/changeRequestEvents');
 const { USER_ROLES } = require('../constants/roles');
 const User = require('../models/User');
@@ -13,6 +14,7 @@ const {
   payloadHasRemoveAttachment,
 } = require('../services/cardStatementRequestApply');
 const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
+const { payloadToCreditCardPaymentUpdate } = require('../utils/creditCardPaymentPayload');
 const {
   normalizeTransactionEditPayload,
   assertTransactionEditRequired,
@@ -205,6 +207,54 @@ async function submitChangeRequest(req, res) {
             return res.status(400).json({
               error:
                 'For purchase_bill edit, include at least one of: bill_date, amount, invoice_number, vendor_name, bill_number, payment_method, description, payment_status',
+            });
+          }
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+      }
+    }
+
+    if (resourceType === 'credit_card_payment') {
+      const pid = parseInt(resourceId, 10);
+      if (!Number.isInteger(pid) || pid < 1) {
+        return res.status(400).json({ error: 'Invalid credit card payment id' });
+      }
+      const paymentRow = await CreditCardPayment.getById(pid);
+      if (!paymentRow) {
+        return res.status(404).json({ error: 'Credit card payment not found' });
+      }
+      if (req.user.role === USER_ROLES.USER) {
+        const dbUser = await User.findById(req.user.id);
+        if (!dbUser) {
+          return res.status(401).json({ error: 'User not found' });
+        }
+        const perms = effectiveSidebarPermissions(dbUser.role, dbUser.sidebarPermissionsStored);
+        if (!perms.customer_credit_card_payments && !perms.credit_cards) {
+          return res.status(403).json({
+            code: 'SIDEBAR_PERMISSION_REQUIRED',
+            error:
+              'Customer Credit Card Payments or Credit Cards access is required to request payment changes.',
+          });
+        }
+        if (
+          paymentRow.created_by != null &&
+          Number(paymentRow.created_by) !== Number(req.user.id)
+        ) {
+          return res.status(403).json({
+            error: 'You can only request changes for credit card payments you created',
+          });
+        }
+      }
+      if (action === 'edit') {
+        try {
+          const keys = payloadToCreditCardPaymentUpdate(payload || {}, {
+            requirePaymentDateAndAmount: false,
+          });
+          if (Object.keys(keys).length === 0) {
+            return res.status(400).json({
+              error:
+                'For credit_card_payment edit, include at least one of: payment_date, amount, credit_card_id, card_holder, remarks, paid_against',
             });
           }
         } catch (err) {

@@ -66,10 +66,20 @@ function normalizePermissionsInput(input) {
 /**
  * Admin and accountant always see the full menu. Standard users use DB (null = none).
  */
+function viewerCreditCardMenuPermissions() {
+  const o = allFalsePermissions();
+  o.credit_cards = true;
+  o.customer_credit_card_payments = true;
+  return o;
+}
+
 function effectiveSidebarPermissions(role, storedRaw) {
   const r = role || USER_ROLES.USER;
   if (r === USER_ROLES.ADMIN || r === USER_ROLES.ACCOUNTANT) {
     return allTruePermissions();
+  }
+  if (r === USER_ROLES.VIEWER) {
+    return viewerCreditCardMenuPermissions();
   }
   const parsed = parseStoredPermissions(storedRaw);
   if (!parsed) {
@@ -83,6 +93,7 @@ module.exports = {
   SIDEBAR_PERMISSION_KEYS,
   allFalsePermissions,
   allTruePermissions,
+  viewerCreditCardMenuPermissions,
   parseStoredPermissions,
   normalizePermissionsInput,
   effectiveSidebarPermissions,
