@@ -112,10 +112,21 @@ class DailyBankStatement {
       dirCandidates.push(path.join(baseDir, 'build', 'uploads', 'daily-bank-statements'));
     }
 
+    const currency = String(record.currency || 'AED').toUpperCase().trim();
+    const currencySubdirs = ['AED', 'USD', 'GBP', currency].filter(Boolean);
     const uniqueDirs = Array.from(new Set(dirCandidates));
+    const filenameCandidates = [];
+    if (filename) {
+      for (const dir of uniqueDirs) {
+        filenameCandidates.push(path.join(dir, filename));
+        for (const code of currencySubdirs) {
+          filenameCandidates.push(path.join(dir, code, filename));
+        }
+      }
+    }
     const candidates = [
       record.file_path,
-      ...(filename ? uniqueDirs.map((dir) => path.join(dir, filename)) : [])
+      ...filenameCandidates
     ].filter(Boolean);
 
     for (const candidate of candidates) {

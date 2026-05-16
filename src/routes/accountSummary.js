@@ -175,6 +175,7 @@ function numericSortIdValue(row) {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const asOfDate = req.query.asOfDate || new Date().toISOString().split('T')[0];
+    const useStatementTotals = String(req.query.useStatementTotals || '').toLowerCase() === 'true';
 
     // Basic YYYY-MM-DD guard to avoid malformed input in SQL filters
     if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
@@ -361,12 +362,17 @@ router.get('/', authenticateToken, async (req, res) => {
       ? formatAmount(latestAvailableBalanceRow.balance)
       : '0.00';
     const availableBalance = mainAvailableBalance;
+    // Legacy: ?useStatementTotals=true maps totalBalance to PDF current balance for older clients.
+    const responseTotalBalance = useStatementTotals && currentBalance
+      ? currentBalance
+      : totalBalance;
 
     res.json({
       success: true,
       data: {
         asOfDate,
-        totalBalance,
+        totalBalance: responseTotalBalance,
+        ledgerBalance: totalBalance,
         currentBalance,
         mainAvailableBalance,
         availableBalance,
@@ -377,7 +383,7 @@ router.get('/', authenticateToken, async (req, res) => {
         statementStatus,
         statementError,
         currentBalanceSource: currentBalance ? 'statement' : null,
-        totalsSource: 'transactions',
+        totalsSource: useStatementTotals && currentBalance ? 'statement' : 'transactions',
         pendingChecks: {
           count: pendingChecksCount,
           totalAmount: totalPendingCheckAmount
