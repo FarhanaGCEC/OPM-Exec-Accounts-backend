@@ -1,4 +1,4 @@
-const pdfParseLib = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 
 const AMOUNT_CAPTURE = '([\\(\\-]?[0-9][0-9,]*(?:\\.[0-9]{1,3})?\\)?)';
 const CURRENCY_HINT = '(?:AED|USD|GBP|د\\.?إ)?';
@@ -10,12 +10,9 @@ function normalizeNumberString(value) {
 
   const isNegativeByBrackets = /^\(.*\)$/.test(raw);
 
-  // Keep only characters that can represent decimal numbers.
   const cleaned = raw.replace(/[^0-9,.]/g, '');
   if (!cleaned) return null;
 
-  // If both comma and dot exist, commas are likely thousands separators.
-  // If only comma exists, treat comma as decimal separator.
   let normalized = cleaned;
   if (normalized.includes('.') && normalized.includes(',')) {
     normalized = normalized.replace(/,/g, '');
@@ -78,7 +75,6 @@ function extractByLabelVariants(text, labelPatterns) {
     if (parsed != null) return parsed;
   }
 
-  // Fallback: look for label then pick first amount in nearby text window.
   const labelIndex = source.search(labelRegex);
   if (labelIndex >= 0) {
     const window = source.slice(labelIndex, labelIndex + 180);
@@ -92,95 +88,67 @@ function extractByLabelVariants(text, labelPatterns) {
   return extractUsingLineHeuristic(text, labelRegex);
 }
 
-async function parseStatementTotalsFromPdfBuffer(buffer) {
-  const legacyPdfParse = typeof pdfParseLib === 'function'
-    ? pdfParseLib
-    : (pdfParseLib && typeof pdfParseLib.default === 'function' ? pdfParseLib.default : null);
-  const PdfParseClass = pdfParseLib && typeof pdfParseLib.PDFParse === 'function'
-    ? pdfParseLib.PDFParse
-    : null;
+function extractTotalsFromText(text) {
+  const closingAvailableBalance = firstNonNull([
+    extractByLabelVariants(text, [
+      'closing\\s*\\(\\s*available\\s*\\)\\s*balance',
+      'closing\\s*\\(available\\)\\s*balance',
+      'closing\\s*available\\s*balance',
+      'closing\\s*\\(\\s*available\\s*\\)'
+    ])
+  ]);
+  const currentBalance = firstNonNull([
+    extractByLabelVariants(text, ['current\\s*balance']),
+    closingAvailableBalance,
+    extractByLabelVariants(text, [
+      'ledger\\s*balance',
+      'closing\\s*balance',
+      'ending\\s*balance'
+    ])
+  ]);
 
-  async function extractText({ firstPageOnly }) {
-    // Legacy pdf-parse API (function export).
-    if (legacyPdfParse) {
-      const parsed = await legacyPdfParse(buffer, firstPageOnly ? { max: 1 } : undefined);
-      return parsed?.text || '';
-    }
-
-    // New pdf-parse API (class export).
-    if (PdfParseClass) {
-      const parser = new PdfParseClass({ data: buffer });
-      try {
-        const parsed = await parser.getText(firstPageOnly ? { max: 1 } : undefined);
-        return parsed?.text || '';
-      } finally {
-        await parser.destroy();
-      }
-    }
-
-    throw new Error('pdf-parse module export is not callable');
-  }
-
-  const extractTotalsFromText = (text) => {
-    const closingAvailableBalance = firstNonNull([
+  return {
+    totalDebitAmount: firstNonNull([
       extractByLabelVariants(text, [
-        'closing\\s*\\(\\s*available\\s*\\)\\s*balance',
-        'closing\\s*\\(available\\)\\s*balance',
-        'closing\\s*available\\s*balance',
-        'closing\\s*\\(\\s*available\\s*\\)'
+        'total\\s*debit\\s*amount',
+        'debit\\s*total',
+        'total\\s*debit',
+        'total\\s*withdrawals?'
       ])
-    ]);
-    const currentBalance = firstNonNull([
-      extractByLabelVariants(text, ['current\\s*balance']),
-      closingAvailableBalance,
+    ]),
+    totalCreditAmount: firstNonNull([
       extractByLabelVariants(text, [
-        'ledger\\s*balance',
-        'closing\\s*balance',
-        'ending\\s*balance'
+        'total\\s*credit\\s*amount',
+        'credit\\s*total',
+        'total\\s*credit',
+        'total\\s*deposits?'
       ])
-    ]);
-
-    return {
-      totalDebitAmount: firstNonNull([
-        extractByLabelVariants(text, [
-          'total\\s*debit\\s*amount',
-          'debit\\s*total',
-          'total\\s*debit',
-          'total\\s*withdrawals?'
-        ])
-      ]),
-      totalCreditAmount: firstNonNull([
-        extractByLabelVariants(text, [
-          'total\\s*credit\\s*amount',
-          'credit\\s*total',
-          'total\\s*credit',
-          'total\\s*deposits?'
-        ])
-      ]),
-      currentBalance,
-      closingAvailableBalance,
-      // Kept for DB / legacy consumers; same value as currentBalance when parsed.
-      ledgerBalance: currentBalance
-    };
+    ]),
+    currentBalance,
+    closingAvailableBalance,
+    ledgerBalance: currentBalance
   };
+}
 
-  // The required totals are typically printed in the statement summary on page 1.
-  const firstPageTotals = extractTotalsFromText(await extractText({ firstPageOnly: true }));
+async function extractTextFromPdfBuffer(buffer, { firstPageOnly }) {
+  const parsed = await pdfParse(buffer, firstPageOnly ? { max: 1 } : undefined);
+  return parsed?.text || '';
+}
+
+async function parseStatementTotalsFromPdfBuffer(buffer) {
+  const firstPageTotals = extractTotalsFromText(await extractTextFromPdfBuffer(buffer, { firstPageOnly: true }));
   if (
     firstPageTotals.totalDebitAmount != null
     || firstPageTotals.totalCreditAmount != null
     || firstPageTotals.currentBalance != null
-    || firstPageTotals.ledgerBalance != null
   ) {
     return firstPageTotals;
   }
 
-  // Fallback to full-document parsing when page 1 text is not extractable.
-  return extractTotalsFromText(await extractText({ firstPageOnly: false }));
+  return extractTotalsFromText(await extractTextFromPdfBuffer(buffer, { firstPageOnly: false }));
 }
 
 async function parseStatementTotalsFromPdfPath(filePath) {
-  // pdf-parse accepts file buffers; readFile kept here to centralize parser usage.
   const fs = require('fs');
   const buffer = await fs.promises.readFile(filePath);
   return parseStatementTotalsFromPdfBuffer(buffer);
