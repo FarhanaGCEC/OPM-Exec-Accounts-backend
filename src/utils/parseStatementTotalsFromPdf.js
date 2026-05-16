@@ -1,4 +1,5 @@
-const pdfParse = require('pdf-parse');
+// Bypass pdf-parse/index.js — it runs test-file debug code when bundled (no module.parent).
+const pdfParse = require('pdf-parse/lib/pdf-parse.js');
 
 const AMOUNT_CAPTURE = '([\\(\\-]?[0-9][0-9,]*(?:\\.[0-9]{1,3})?\\)?)';
 const CURRENCY_HINT = '(?:AED|USD|GBP|د\\.?إ)?';
