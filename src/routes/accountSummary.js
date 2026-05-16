@@ -2,6 +2,8 @@ const express = require('express');
 const { pool } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth');
 const Transaction = require('../models/Transaction');
+const DailyBankStatement = require('../models/DailyBankStatement');
+const { parseStatementTotalsFromPdfPath } = require('../utils/parseStatementTotalsFromPdf');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   isCustomerPdcType,
@@ -11,6 +13,95 @@ const {
 } = require('../utils/pdcLedgerApproval');
 
 const router = express.Router();
+
+function hasExtractedAmounts(extracted) {
+  return extracted
+    && (extracted.totalDebitAmount != null
+      || extracted.totalCreditAmount != null
+      || extracted.currentBalance != null
+      || extracted.ledgerBalance != null);
+}
+
+function formatStatementTotals(extracted) {
+  if (!hasExtractedAmounts(extracted)) return null;
+  const currentBalanceRaw = extracted.currentBalance ?? extracted.ledgerBalance;
+  return {
+    totalDebitAmount: extracted.totalDebitAmount != null ? formatAmount(extracted.totalDebitAmount) : null,
+    totalCreditAmount: extracted.totalCreditAmount != null ? formatAmount(extracted.totalCreditAmount) : null,
+    currentBalance: currentBalanceRaw != null ? formatAmount(currentBalanceRaw) : null,
+    closingAvailableBalance: extracted.closingAvailableBalance != null
+      ? formatAmount(extracted.closingAvailableBalance)
+      : null,
+    ledgerBalance: currentBalanceRaw != null ? formatAmount(currentBalanceRaw) : null
+  };
+}
+
+function getStatementTotalsFromRecord(record) {
+  if (!record) return null;
+  const extracted = {
+    totalDebitAmount: record.statement_total_debit_amount != null ? Number(record.statement_total_debit_amount) : null,
+    totalCreditAmount: record.statement_total_credit_amount != null ? Number(record.statement_total_credit_amount) : null,
+    ledgerBalance: record.statement_ledger_balance != null ? Number(record.statement_ledger_balance) : null
+  };
+  return formatStatementTotals(extracted);
+}
+
+async function resolveStatementTotalsFromDailyPdf(currency = 'AED') {
+  const currentStatement = await DailyBankStatement.getCurrent(currency);
+  if (!currentStatement) {
+    return {
+      statementTotals: null,
+      statementMeta: null,
+      statementStatus: 'not_found',
+      statementError: null
+    };
+  }
+
+  const statementMeta = {
+    currency,
+    uploadedAt: currentStatement.uploaded_at || null,
+    updatedAt: currentStatement.updated_at || null,
+    originalFilename: currentStatement.original_filename || null
+  };
+
+  const readablePath = await DailyBankStatement.resolveReadableFilePath(currentStatement);
+  if (readablePath) {
+    const extracted = await parseStatementTotalsFromPdfPath(readablePath);
+    const formattedTotals = formatStatementTotals(extracted);
+    if (formattedTotals?.currentBalance != null) {
+      return { statementTotals: formattedTotals, statementMeta, statementStatus: 'parsed', statementError: null };
+    }
+    if (formattedTotals) {
+      return {
+        statementTotals: formattedTotals,
+        statementMeta,
+        statementStatus: 'parsed_no_totals',
+        statementError: 'Current balance not found in uploaded PDF'
+      };
+    }
+  }
+
+  const cachedTotals = getStatementTotalsFromRecord(currentStatement);
+  if (cachedTotals?.currentBalance != null) {
+    return { statementTotals: cachedTotals, statementMeta, statementStatus: 'parsed', statementError: null };
+  }
+
+  if (!readablePath) {
+    return {
+      statementTotals: cachedTotals,
+      statementMeta,
+      statementStatus: 'file_missing',
+      statementError: 'Daily statement file is missing on server storage'
+    };
+  }
+
+  return {
+    statementTotals: cachedTotals,
+    statementMeta,
+    statementStatus: 'parsed_no_totals',
+    statementError: 'Current balance not found in uploaded PDF'
+  };
+}
 
 function toYmd(d) {
   if (d == null) return '';
@@ -246,30 +337,46 @@ router.get('/', authenticateToken, async (req, res) => {
       availableBalanceRows.length > 0
         ? availableBalanceRows[availableBalanceRows.length - 1]
         : null;
+    let statementTotals = null;
+    let statementMeta = null;
+    let statementStatus = 'not_found';
+    let statementError = null;
+    try {
+      ({
+        statementTotals,
+        statementMeta,
+        statementStatus,
+        statementError
+      } = await resolveStatementTotalsFromDailyPdf('AED'));
+    } catch (statementParseError) {
+      statementStatus = 'parse_failed';
+      statementError = statementParseError.message || 'Failed to parse daily bank statement PDF';
+      console.error('Failed to parse daily bank statement for account summary:', statementParseError.message);
+    }
+
+    // Current balance: bank statement PDF (Current / Closing balance labels).
+    const currentBalance = statementTotals?.currentBalance ?? null;
+    // Available balance: ledger row with remarks "Available Balance" only.
     const mainAvailableBalance = latestAvailableBalanceRow
       ? formatAmount(latestAvailableBalanceRow.balance)
-      : totalBalance;
+      : '0.00';
     const availableBalance = mainAvailableBalance;
-
-    const statementTotals = null;
-    const statementMeta = null;
-    const statementStatus = 'disabled';
-    const statementError = null;
 
     res.json({
       success: true,
       data: {
         asOfDate,
         totalBalance,
+        currentBalance,
         mainAvailableBalance,
         availableBalance,
         totalCredit,
         totalDebit,
-        // Bank statement parsing is intentionally disabled; totals come from transactions table only.
         statementTotals,
         statementMeta,
         statementStatus,
         statementError,
+        currentBalanceSource: currentBalance ? 'statement' : null,
         totalsSource: 'transactions',
         pendingChecks: {
           count: pendingChecksCount,

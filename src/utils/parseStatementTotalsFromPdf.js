@@ -121,38 +121,55 @@ async function parseStatementTotalsFromPdfBuffer(buffer) {
     throw new Error('pdf-parse module export is not callable');
   }
 
-  const extractTotalsFromText = (text) => ({
-    totalDebitAmount: firstNonNull([
+  const extractTotalsFromText = (text) => {
+    const closingAvailableBalance = firstNonNull([
       extractByLabelVariants(text, [
-        'total\\s*debit\\s*amount',
-        'debit\\s*total',
-        'total\\s*debit',
-        'total\\s*withdrawals?'
+        'closing\\s*\\(\\s*available\\s*\\)\\s*balance',
+        'closing\\s*\\(available\\)\\s*balance',
+        'closing\\s*available\\s*balance',
+        'closing\\s*\\(\\s*available\\s*\\)'
       ])
-    ]),
-    totalCreditAmount: firstNonNull([
-      extractByLabelVariants(text, [
-        'total\\s*credit\\s*amount',
-        'credit\\s*total',
-        'total\\s*credit',
-        'total\\s*deposits?'
-      ])
-    ]),
-    ledgerBalance: firstNonNull([
+    ]);
+    const currentBalance = firstNonNull([
+      extractByLabelVariants(text, ['current\\s*balance']),
+      closingAvailableBalance,
       extractByLabelVariants(text, [
         'ledger\\s*balance',
         'closing\\s*balance',
-        'ending\\s*balance',
-        'current\\s*balance'
+        'ending\\s*balance'
       ])
-    ])
-  });
+    ]);
+
+    return {
+      totalDebitAmount: firstNonNull([
+        extractByLabelVariants(text, [
+          'total\\s*debit\\s*amount',
+          'debit\\s*total',
+          'total\\s*debit',
+          'total\\s*withdrawals?'
+        ])
+      ]),
+      totalCreditAmount: firstNonNull([
+        extractByLabelVariants(text, [
+          'total\\s*credit\\s*amount',
+          'credit\\s*total',
+          'total\\s*credit',
+          'total\\s*deposits?'
+        ])
+      ]),
+      currentBalance,
+      closingAvailableBalance,
+      // Kept for DB / legacy consumers; same value as currentBalance when parsed.
+      ledgerBalance: currentBalance
+    };
+  };
 
   // The required totals are typically printed in the statement summary on page 1.
   const firstPageTotals = extractTotalsFromText(await extractText({ firstPageOnly: true }));
   if (
     firstPageTotals.totalDebitAmount != null
     || firstPageTotals.totalCreditAmount != null
+    || firstPageTotals.currentBalance != null
     || firstPageTotals.ledgerBalance != null
   ) {
     return firstPageTotals;

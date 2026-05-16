@@ -70,6 +70,7 @@ function hasExtractedAmounts(extracted) {
   return extracted
     && (extracted.totalDebitAmount != null
       || extracted.totalCreditAmount != null
+      || extracted.currentBalance != null
       || extracted.ledgerBalance != null);
 }
 
@@ -92,16 +93,17 @@ router.get('/', authenticateToken, async (req, res) => {
     }
 
     const current = await DailyBankStatement.getCurrent(currency);
-    let extractedTotals = getExtractedTotalsFromRecord(current);
-    if (!extractedTotals) {
-      const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
-      if (readablePath) {
-        try {
-          extractedTotals = await parseStatementTotalsFromPdfPath(readablePath);
-        } catch (parseError) {
-          console.error('Failed to parse uploaded daily bank statement PDF:', parseError.message);
-        }
+    let extractedTotals = null;
+    const readablePath = await DailyBankStatement.resolveReadableFilePath(current);
+    if (readablePath) {
+      try {
+        extractedTotals = await parseStatementTotalsFromPdfPath(readablePath);
+      } catch (parseError) {
+        console.error('Failed to parse uploaded daily bank statement PDF:', parseError.message);
       }
+    }
+    if (!extractedTotals) {
+      extractedTotals = getExtractedTotalsFromRecord(current);
     }
     return res.json({
       success: true,
@@ -226,7 +228,7 @@ router.post(
       uploadedBy: req.user?.id || null,
       statementTotalDebitAmount: extractedTotals?.totalDebitAmount ?? null,
       statementTotalCreditAmount: extractedTotals?.totalCreditAmount ?? null,
-      statementLedgerBalance: extractedTotals?.ledgerBalance ?? null
+      statementLedgerBalance: extractedTotals?.currentBalance ?? extractedTotals?.ledgerBalance ?? null
     });
 
     if (previous && previous.file_path && previous.file_path !== newFilePath) {
