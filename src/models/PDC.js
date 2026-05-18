@@ -263,6 +263,25 @@ class PDC {
     }
   }
 
+  static async clearChequeAttachment(id) {
+    try {
+      const updateResult = await pool.query(
+        `UPDATE post_dated_cheques
+         SET attachment_name = NULL, attachment_url = NULL,
+             attachment_cloudinary_public_id = NULL, attachment_resource_type = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [id]
+      );
+      if (updateResult.affectedRows === 0) {
+        return null;
+      }
+      return await this.getById(id);
+    } catch (error) {
+      throw error;
+    }
+  }
+
   /** Set cheque scan/PDF (Cloudinary); does not alter other fields */
   static async setChequeAttachment(
     id,

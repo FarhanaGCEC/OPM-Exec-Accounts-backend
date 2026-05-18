@@ -420,6 +420,24 @@ const initDatabase = async () => {
           "ALTER TABLE transactions ADD COLUMN transaction_time TIME NOT NULL DEFAULT '00:00:00' AFTER `date`"
         );
       }
+      if (!(await columnExists('transactions', 'attachment_name'))) {
+        await pool.query(
+          'ALTER TABLE transactions ADD COLUMN attachment_name VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('transactions', 'attachment_url'))) {
+        await pool.query('ALTER TABLE transactions ADD COLUMN attachment_url TEXT NULL');
+      }
+      if (!(await columnExists('transactions', 'attachment_cloudinary_public_id'))) {
+        await pool.query(
+          'ALTER TABLE transactions ADD COLUMN attachment_cloudinary_public_id VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('transactions', 'attachment_resource_type'))) {
+        await pool.query(
+          "ALTER TABLE transactions ADD COLUMN attachment_resource_type VARCHAR(16) NULL"
+        );
+      }
     }
     await ensureIndex('transactions', 'idx_transactions_date', '`date`');
     await ensureIndex('transactions', 'idx_transactions_date_time_id', '`date`, transaction_time, id');

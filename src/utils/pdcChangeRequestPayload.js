@@ -1,4 +1,9 @@
 const { roundToTwoDecimals } = require('./formatAmount');
+const { normalizePdcDescriptionInput } = require('./pdcDescription');
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
 
 function normalizePdcInput(body = {}) {
   const customerName =
@@ -99,7 +104,63 @@ function validateAndBuildPdcUpdate(body) {
   };
 }
 
+const PDC_BODY_FIELD_KEYS = [
+  'chequeDate',
+  'cheque_date',
+  'chequeNumber',
+  'cheque_number',
+  'customerName',
+  'customer_name',
+  'customer',
+  'payee',
+  'payeeName',
+  'payee_name',
+  'partyName',
+  'party_name',
+  'amount',
+  'chequeType',
+  'cheque_type',
+  'pdcType',
+  'pdc_type',
+  'description',
+  'description_text',
+  'remarks'
+];
+
+function bodyHasPdcFieldUpdates(body) {
+  const b = body || {};
+  return PDC_BODY_FIELD_KEYS.some((k) => Object.prototype.hasOwnProperty.call(b, k));
+}
+
+/** Fill missing PATCH fields from the existing DB row (supports attachment-only edits). */
+function mergePdcUpdateWithExisting(body, existing) {
+  const b = body || {};
+  const n = normalizePdcInput(b);
+  const descInBody = hasOwn(b, 'description') || hasOwn(b, 'description_text') || hasOwn(b, 'remarks');
+  const pdcType = n.pdcType ?? existing.pdc_type;
+  let description = existing.description;
+  if (descInBody) {
+    const rawDesc = hasOwn(b, 'remarks') && !hasOwn(b, 'description') && !hasOwn(b, 'description_text')
+      ? b.remarks
+      : n.description;
+    description = normalizePdcDescriptionInput(rawDesc, pdcType);
+  }
+  return {
+    chequeDate: n.chequeDate ?? existing.cheque_date,
+    chequeNumber: n.chequeNumber ?? existing.cheque_number,
+    customerName: n.customerName ?? existing.customer_name,
+    amount: n.amount != null && n.amount !== '' ? n.amount : existing.amount,
+    chequeType: n.chequeType ?? existing.cheque_type,
+    pdcType,
+    description
+  };
+}
+
 module.exports = {
   normalizePdcInput,
   validateAndBuildPdcUpdate,
+  bodyHasPdcFieldUpdates,
+  mergePdcUpdateWithExisting,
+  collectMissingPdcFields,
+  isMissingPdcRequired
 };

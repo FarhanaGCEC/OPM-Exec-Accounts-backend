@@ -1,6 +1,6 @@
 const express = require('express');
 const Transaction = require('../models/Transaction');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
 const { USER_ROLES } = require('../constants/roles');
 const {
@@ -22,6 +22,21 @@ const {
   paymentFromDetails
 } = require('../utils/parseBankLedgerBulkCsv');
 const { uploadBankLedgerCsv } = require('../middleware/bankLedgerCsvUpload');
+const { optionalPdcImageMultipart } = require('../middleware/pdcAttachmentUpload');
+const {
+  buildTransactionAttachmentPayload,
+  buildPdcAttachmentPayload,
+  normalizeMediaUrl
+} = require('../utils/attachmentPayload');
+const {
+  applyTransactionChequeAttachmentFromRequest,
+  clearTransactionChequeAttachment,
+  decodeChequeAttachmentBase64FromBody
+} = require('../utils/transactionChequeAttachment');
+const { applyPdcChequeAttachmentFromRequest } = require('../utils/pdcChequeAttachment');
+const { payloadWantsRemoveAttachment } = require('../utils/chequeAttachmentRemove');
+const { bodyHasPdcFieldUpdates, mergePdcUpdateWithExisting } = require('../utils/pdcChangeRequestPayload');
+const { isCloudinaryConfigured } = require('../services/cloudinaryTransactionUpload');
 
 const router = express.Router();
 
@@ -151,6 +166,10 @@ async function fetchPdcRowsMaturedForDailyLedger({ startDate, endDate } = {}) {
       pdc.cheque_type,
       pdc.pdc_type,
       pdc.description,
+      pdc.attachment_name,
+      pdc.attachment_url,
+      pdc.attachment_cloudinary_public_id,
+      pdc.attachment_resource_type,
       pdc.created_by,
       u.username AS created_by_username,
       pdc.created_at
@@ -199,6 +218,10 @@ async function fetchPdcRowsFutureGcecForDailyLedger({ startDate, endDate } = {})
       pdc.cheque_type,
       pdc.pdc_type,
       pdc.description,
+      pdc.attachment_name,
+      pdc.attachment_url,
+      pdc.attachment_cloudinary_public_id,
+      pdc.attachment_resource_type,
       pdc.created_by,
       u.username AS created_by_username,
       pdc.created_at
@@ -261,6 +284,7 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
     balance: null,
     remarks,
     balanceCellBgColor: getBalanceCellBgColorByRemarks(remarks),
+    attachment: buildPdcAttachmentPayload(pdc),
     createdBy: pdc.created_by,
     createdByUsername: pdc.created_by_username || null,
     createdAt: pdc.created_at,
@@ -411,6 +435,10 @@ router.get('/all', authenticateToken, async (req, res) => {
         t.amount,
         t.balance,
         t.remarks,
+        t.attachment_name,
+        t.attachment_url,
+        t.attachment_cloudinary_public_id,
+        t.attachment_resource_type,
         t.created_by,
         u.username as created_by_username,
         t.created_at,
@@ -435,6 +463,7 @@ router.get('/all', authenticateToken, async (req, res) => {
       balance: formatAmount(txn.balance),
       remarks: txn.remarks || null,
       balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
+      attachment: buildTransactionAttachmentPayload(txn),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
@@ -634,6 +663,7 @@ router.get('/', authenticateToken, async (req, res) => {
       balance: formatAmount(txn.balance),
       remarks: txn.remarks || null,
       balanceCellBgColor: getBalanceCellBgColorByRemarks(txn.remarks),
+      attachment: buildTransactionAttachmentPayload(txn),
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at
@@ -932,6 +962,7 @@ function formatCreatedTransactionRow(transaction) {
     balance: formatAmount(transaction.balance),
     remarks: transaction.remarks || null,
     balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
+    attachment: buildTransactionAttachmentPayload(transaction),
     createdBy:
       transaction.created_by != null ? jsonSafeInt(transaction.created_by) : null,
     createdByUsername: transaction.created_by_username,
@@ -1428,6 +1459,165 @@ router.post(
   }
 );
 
+// Cheque attachment (image redirect or PDF proxy) — before GET /:id
+router.get('/:id/attachment', authenticateTokenOrQuery, async (req, res) => {
+  try {
+    const txnId = parseInt(req.params.id, 10);
+    if (Number.isNaN(txnId)) {
+      return res.status(400).json({ success: false, error: 'Invalid transaction id' });
+    }
+
+    const txn = await Transaction.getById(txnId);
+    if (!txn) {
+      return res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+    }
+
+    const mediaUrl = normalizeMediaUrl(txn.attachment_url);
+    if (!mediaUrl) {
+      return res.status(404).json({
+        success: false,
+        error: 'No cheque attachment available'
+      });
+    }
+
+    const resourceType = txn.attachment_resource_type || 'image';
+    const isPdf =
+      resourceType === 'raw' ||
+      /\.pdf($|\?)/i.test(txn.attachment_name || txn.attachment_url);
+
+    if (!isPdf) {
+      return res.redirect(302, mediaUrl);
+    }
+
+    if (!isCloudinaryConfigured() || !txn.attachment_cloudinary_public_id) {
+      return res.redirect(302, mediaUrl);
+    }
+
+    let signedUrl;
+    try {
+      const { cloudinary } = require('../config/cloudinary');
+      signedUrl = cloudinary.utils.private_download_url(
+        txn.attachment_cloudinary_public_id,
+        '',
+        {
+          resource_type: 'raw',
+          type: 'upload',
+          expires_at: Math.floor(Date.now() / 1000) + 600
+        }
+      );
+    } catch (e) {
+      console.error('Cloudinary private_download_url error:', e);
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to sign Cloudinary download URL'
+      });
+    }
+
+    let upstream;
+    try {
+      upstream = await fetch(signedUrl);
+    } catch (e) {
+      console.error('Transaction PDF fetch error:', e);
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to retrieve cheque attachment from Cloudinary'
+      });
+    }
+    if (!upstream.ok) {
+      const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status;
+      return res.status(status).json({
+        success: false,
+        error: `Cloudinary returned ${upstream.status} fetching attachment`
+      });
+    }
+
+    const filename = (txn.attachment_name || `cheque-${txn.id}.pdf`).replace(/"/g, '');
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/pdf');
+    const upstreamLen = upstream.headers.get('content-length');
+    if (upstreamLen) res.setHeader('Content-Length', upstreamLen);
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    if (!upstream.body) {
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      return res.end(buf);
+    }
+    const reader = upstream.body.getReader();
+    res.on('close', () => {
+      try {
+        reader.cancel();
+      } catch (_) {}
+    });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!res.write(Buffer.from(value))) {
+        await new Promise((r) => res.once('drain', r));
+      }
+    }
+    res.end();
+  } catch (error) {
+    console.error('Error resolving transaction attachment:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to resolve attachment'
+      });
+    } else {
+      try {
+        res.end();
+      } catch (_) {}
+    }
+  }
+});
+
+router.delete(
+  '/:id/attachment',
+  authenticateToken,
+  requireElevatedForMutation,
+  async (req, res) => {
+    try {
+      const txnId = parseInt(req.params.id, 10);
+      if (Number.isNaN(txnId)) {
+        return res.status(400).json({ success: false, error: 'Invalid transaction id' });
+      }
+
+      const existing = await Transaction.getById(txnId);
+      if (!existing) {
+        return res.status(404).json({
+          success: false,
+          error: 'Transaction not found'
+        });
+      }
+
+      if (!existing.attachment_url && !existing.attachment_cloudinary_public_id) {
+        return res.json({
+          success: true,
+          message: 'No cheque attachment on this transaction',
+          data: formatCreatedTransactionRow(existing)
+        });
+      }
+
+      await clearTransactionChequeAttachment(txnId, existing);
+      const full = await Transaction.getById(txnId);
+      res.json({
+        success: true,
+        message: 'Cheque attachment removed',
+        data: formatCreatedTransactionRow(full)
+      });
+    } catch (error) {
+      console.error('Error deleting transaction attachment:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to delete cheque attachment'
+      });
+    }
+  }
+);
+
 // Get a single transaction by ID
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
@@ -1456,6 +1646,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
         balance: formatAmount(transaction.balance),
         remarks: transaction.remarks || null,
         balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
+        attachment: buildTransactionAttachmentPayload(transaction),
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -1469,8 +1660,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Create a new transaction
-router.post('/', authenticateToken, async (req, res) => {
+// Create a new transaction (multipart field `attachment` or JSON attachmentBase64 when paymentType is cheque)
+router.post('/', optionalPdcImageMultipart, authenticateToken, async (req, res) => {
   try {
     const {
       date,
@@ -1543,22 +1734,40 @@ router.post('/', authenticateToken, async (req, res) => {
     // Get user ID from JWT token (req.user is set by authenticateToken middleware)
     const createdBy = req.user ? req.user.id : null;
 
+    const paymentTypeNorm = paymentType.toLowerCase();
+
     const transaction = await Transaction.create({
       date: formattedDate,
       transactionTime: normalizedTransactionTime,
       type: type,
       categoryId: categoryId ? parseInt(categoryId) : null,
-      paymentType: paymentType.toLowerCase(),
+      paymentType: paymentTypeNorm,
       chequeNumber: chequeNumber || null,
       amount: roundedAmount,
       remarks: remarks || null,
       createdBy: createdBy
     });
 
+    const attachResult = await applyTransactionChequeAttachmentFromRequest(
+      req,
+      transaction.id,
+      paymentTypeNorm,
+      null
+    );
+    if (!attachResult.ok) {
+      await Transaction.delete(transaction.id);
+      return res.status(attachResult.status || 400).json({
+        success: false,
+        error: attachResult.error
+      });
+    }
+
+    const withAttachment = await Transaction.getById(transaction.id);
+
     res.status(201).json({
       success: true,
       message: 'Transaction created successfully',
-      data: formatCreatedTransactionRow(transaction)
+      data: formatCreatedTransactionRow(withAttachment || transaction)
     });
   } catch (error) {
     console.error('Error creating transaction:', error);
@@ -1569,9 +1778,10 @@ router.post('/', authenticateToken, async (req, res) => {
   }
 });
 
-// Update a transaction
+// Update a transaction (multipart `attachment` or JSON attachmentBase64 when paymentType is cheque)
 router.put(
   '/:id',
+  optionalPdcImageMultipart,
   authenticateToken,
   async (req, res) => {
   if (req.user && req.user.role === USER_ROLES.USER) {
@@ -1590,10 +1800,64 @@ router.put(
         });
       }
 
+      const body = req.body || {};
+      const decodedPdcImage = decodeChequeAttachmentBase64FromBody(body);
+      if (decodedPdcImage && decodedPdcImage.error) {
+        return res.status(400).json({ success: false, error: decodedPdcImage.error });
+      }
+      const hasPdcAttachOp =
+        payloadWantsRemoveAttachment(body) ||
+        Boolean(req.file && req.file.buffer && req.file.buffer.length) ||
+        Boolean(decodedPdcImage && decodedPdcImage.buffer);
+
+      if (hasPdcAttachOp && !bodyHasPdcFieldUpdates(body)) {
+        const attachOnly = await applyPdcChequeAttachmentFromRequest(req, pdcId, existingPdc);
+        if (!attachOnly.ok) {
+          return res.status(attachOnly.status || 400).json({
+            success: false,
+            error: attachOnly.error
+          });
+        }
+        const responsePdc = await PDC.getById(pdcId);
+        const isCustomerPdc = isCustomerPdcType(responsePdc.pdc_type);
+        const ledgerApproved = parseDailyLedgerApproved(responsePdc.daily_ledger_approved);
+        return res.json({
+          success: true,
+          message: payloadWantsRemoveAttachment(body)
+            ? 'Cheque attachment removed'
+            : 'Cheque attachment updated',
+          data: {
+            id: `pdc-due-${responsePdc.id}`,
+            pdcId: responsePdc.id,
+            date: responsePdc.cheque_date,
+            transactionTime: isCustomerPdc
+              ? ledgerApproved
+                ? formatTimeForDisplay(responsePdc.daily_ledger_approved_at) || '09:00:00'
+                : '09:00:00'
+              : '00:00:00',
+            category: responsePdc.customer_name || '-',
+            paymentType: 'cheque',
+            chequeNumber: responsePdc.cheque_number || '-',
+            debit: isCustomerPdc ? null : formatAmount(responsePdc.amount),
+            credit: isCustomerPdc ? formatAmount(responsePdc.amount) : null,
+            remarks: buildPdcRemarks(responsePdc.pdc_type, responsePdc.description, {
+              hideTypeFallback: isCustomerPdc && ledgerApproved
+            }),
+            attachment: buildPdcAttachmentPayload(responsePdc),
+            pdcType: responsePdc.pdc_type,
+            dailyLedgerApproved: ledgerApproved,
+            dailyLedgerApprovedAt: responsePdc.daily_ledger_approved_at || null,
+            dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(
+              responsePdc.daily_ledger_approved_at
+            )
+          }
+        });
+      }
+
       const validChequeTypes = ['Payment Cheque', 'Security Cheque', 'Other'];
       const validPDCTypes = ['GCEC PDC', 'Customer PDC', 'Custom PDC'];
-      const body = req.body || {};
-      const inputDate = body.chequeDate ?? body.cheque_date ?? body.date ?? existingPdc.cheque_date;
+      const mergedPdc = mergePdcUpdateWithExisting(body, existingPdc);
+      const inputDate = body.chequeDate ?? body.cheque_date ?? body.date ?? mergedPdc.chequeDate;
       const amountRaw =
         body.amount != null && body.amount !== ''
           ? body.amount
@@ -1602,15 +1866,10 @@ router.put(
             : body.credit != null && body.credit !== ''
               ? body.credit
               : existingPdc.amount;
-      const chequeNumber = body.chequeNumber ?? body.cheque_number ?? existingPdc.cheque_number;
-      const customerName =
-        body.customerName ??
-        body.customer_name ??
-        body.customer ??
-        body.category ??
-        existingPdc.customer_name;
-      const chequeType = body.chequeType ?? body.cheque_type ?? existingPdc.cheque_type;
-      const pdcType = body.pdcType ?? body.pdc_type ?? existingPdc.pdc_type;
+      const chequeNumber = mergedPdc.chequeNumber;
+      const customerName = body.category ?? mergedPdc.customerName;
+      const chequeType = mergedPdc.chequeType;
+      const pdcType = mergedPdc.pdcType;
       const descriptionInput =
         hasOwn(body, 'description')
           ? body.description
@@ -1618,7 +1877,7 @@ router.put(
             ? body.description_text
             : hasOwn(body, 'remarks')
               ? body.remarks
-              : existingPdc.description;
+              : mergedPdc.description;
       const description = normalizePdcDescriptionInput(descriptionInput, pdcType);
       const transactionTimeInput = body.transactionTime ?? body.transaction_time ?? body.time;
 
@@ -1689,8 +1948,22 @@ router.put(
         });
       }
 
-      let responsePdc = updatedPdc;
-      const updatedIsCustomerPdc = isCustomerPdcType(updatedPdc.pdc_type);
+      const attachResult = await applyPdcChequeAttachmentFromRequest(req, pdcId, existingPdc);
+      if (!attachResult.ok) {
+        return res.status(attachResult.status || 400).json({
+          success: false,
+          error: attachResult.error
+        });
+      }
+
+      let responsePdc = await PDC.getById(pdcId);
+      if (!responsePdc) {
+        return res.status(404).json({
+          success: false,
+          error: 'Post-dated cheque not found'
+        });
+      }
+      const updatedIsCustomerPdc = isCustomerPdcType(responsePdc.pdc_type);
       const updatedLedgerApproved = parseDailyLedgerApproved(updatedPdc.daily_ledger_approved);
       if (normalizedTransactionTime && updatedIsCustomerPdc && updatedLedgerApproved) {
         const approvedAt = `${formattedDate} ${normalizedTransactionTime}`;
@@ -1728,11 +2001,69 @@ router.put(
           remarks: buildPdcRemarks(responsePdc.pdc_type, responsePdc.description, {
             hideTypeFallback: isCustomerPdc && ledgerApproved
           }),
+          attachment: buildPdcAttachmentPayload(responsePdc),
           pdcType: responsePdc.pdc_type,
           dailyLedgerApproved: ledgerApproved,
           dailyLedgerApprovedAt: responsePdc.daily_ledger_approved_at || null,
           dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(responsePdc.daily_ledger_approved_at)
         }
+      });
+    }
+
+    const body = req.body || {};
+    const existingTxnEarly = await Transaction.getById(id);
+    if (!existingTxnEarly) {
+      return res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+    }
+
+    const txnFieldKeys = [
+      'date',
+      'transactionTime',
+      'transaction_time',
+      'time',
+      'type',
+      'categoryId',
+      'category_id',
+      'paymentType',
+      'payment_type',
+      'chequeNumber',
+      'cheque_number',
+      'amount',
+      'remarks'
+    ];
+    const hasTxnFieldUpdates = txnFieldKeys.some((k) => hasOwn(body, k));
+    const decodedTxnImage = decodeChequeAttachmentBase64FromBody(body);
+    if (decodedTxnImage && decodedTxnImage.error) {
+      return res.status(400).json({ success: false, error: decodedTxnImage.error });
+    }
+    const hasTxnAttachOp =
+      payloadWantsRemoveAttachment(body) ||
+      Boolean(req.file && req.file.buffer && req.file.buffer.length) ||
+      Boolean(decodedTxnImage && decodedTxnImage.buffer);
+
+    if (hasTxnAttachOp && !hasTxnFieldUpdates) {
+      const attachOnly = await applyTransactionChequeAttachmentFromRequest(
+        req,
+        id,
+        existingTxnEarly.payment_type,
+        existingTxnEarly
+      );
+      if (!attachOnly.ok) {
+        return res.status(attachOnly.status || 400).json({
+          success: false,
+          error: attachOnly.error
+        });
+      }
+      const withAttachment = await Transaction.getById(id);
+      return res.json({
+        success: true,
+        message: payloadWantsRemoveAttachment(body)
+          ? 'Cheque attachment removed'
+          : 'Cheque attachment updated',
+        data: formatCreatedTransactionRow(withAttachment)
       });
     }
 
@@ -1745,7 +2076,7 @@ router.put(
       chequeNumber,
       amount,
       remarks
-    } = req.body;
+    } = body;
 
     // Validation
     if (!date || !type || !paymentType || !amount) {
@@ -1804,12 +2135,15 @@ router.put(
       });
     }
 
+    const paymentTypeNorm = paymentType.toLowerCase();
+    const existingTxn = existingTxnEarly;
+
     const transaction = await Transaction.update(id, {
       date: formattedDate,
       transactionTime: normalizedTransactionTime,
       type: type,
       categoryId: categoryId ? parseInt(categoryId) : null,
-      paymentType: paymentType.toLowerCase(),
+      paymentType: paymentTypeNorm,
       chequeNumber: chequeNumber || null,
       amount: roundedAmount,
       remarks: remarks || null
@@ -1822,25 +2156,25 @@ router.put(
       });
     }
 
+    const attachResult = await applyTransactionChequeAttachmentFromRequest(
+      req,
+      id,
+      paymentTypeNorm,
+      existingTxn
+    );
+    if (!attachResult.ok) {
+      return res.status(attachResult.status || 400).json({
+        success: false,
+        error: attachResult.error
+      });
+    }
+
+    const withAttachment = await Transaction.getById(id);
+
     res.json({
       success: true,
       message: 'Transaction updated successfully',
-      data: {
-        id: transaction.id,
-        date: transaction.date,
-        transactionTime: transaction.transaction_time || '00:00:00',
-        category: transaction.category_name || '-',
-        paymentType: transaction.payment_type,
-        chequeNumber: transaction.cheque_number || '-',
-        debit: transaction.type === 'Debit' ? formatAmount(transaction.amount) : null,
-        credit: transaction.type === 'Credit' ? formatAmount(transaction.amount) : null,
-        balance: formatAmount(transaction.balance),
-        remarks: transaction.remarks || null,
-        balanceCellBgColor: getBalanceCellBgColorByRemarks(transaction.remarks),
-        createdBy: transaction.created_by,
-        createdByUsername: transaction.created_by_username,
-        createdAt: transaction.created_at
-      }
+      data: formatCreatedTransactionRow(withAttachment || transaction)
     });
   } catch (error) {
     console.error('Error updating transaction:', error);

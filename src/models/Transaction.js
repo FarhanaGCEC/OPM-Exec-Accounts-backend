@@ -1,4 +1,11 @@
 const { pool } = require('../config/database');
+const { destroyTransactionChequeImage } = require('../services/cloudinaryTransactionUpload');
+
+const TRANSACTION_SELECT_ATTACHMENT = `
+          t.attachment_name,
+          t.attachment_url,
+          t.attachment_cloudinary_public_id,
+          t.attachment_resource_type,`;
 
 // Helper function to round to 2 decimal places
 const roundToTwoDecimals = (value) => {
@@ -138,6 +145,7 @@ SET t.balance = x.running_bal
           t.amount,
           t.balance,
           t.remarks,
+${TRANSACTION_SELECT_ATTACHMENT}
           t.created_by,
           u.username as created_by_username,
           t.created_at
@@ -170,6 +178,7 @@ SET t.balance = x.running_bal
           t.amount,
           t.balance,
           t.remarks,
+${TRANSACTION_SELECT_ATTACHMENT}
           t.created_by,
           u.username as created_by_username,
           t.created_at
@@ -283,7 +292,9 @@ SET t.balance = x.running_bal
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        `SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks,
+         attachment_name, attachment_url, attachment_cloudinary_public_id, attachment_resource_type,
+         created_by, created_at FROM transactions WHERE id = ?`,
         [insertedId]
       );
       const transaction = fetchResult.rows[0];
@@ -554,7 +565,9 @@ SET t.balance = x.running_bal
 
       // Fetch updated transaction
       const fetchResult = await pool.query(
-        'SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks, created_by, created_at FROM transactions WHERE id = ?',
+        `SELECT id, date, transaction_time, type, category_id, category_type, payment_type, cheque_number, amount, balance, remarks,
+         attachment_name, attachment_url, attachment_cloudinary_public_id, attachment_resource_type,
+         created_by, created_at FROM transactions WHERE id = ?`,
         [id]
       );
       const updatedTransaction = fetchResult.rows[0];
@@ -583,12 +596,48 @@ SET t.balance = x.running_bal
     }
   }
 
+  static async setChequeAttachment(
+    id,
+    { attachmentName, attachmentUrl, attachmentCloudinaryPublicId, attachmentResourceType }
+  ) {
+    await pool.query(
+      `UPDATE transactions
+       SET attachment_name = ?, attachment_url = ?, attachment_cloudinary_public_id = ?, attachment_resource_type = ?
+       WHERE id = ?`,
+      [
+        attachmentName,
+        attachmentUrl,
+        attachmentCloudinaryPublicId,
+        attachmentResourceType || 'image',
+        id
+      ]
+    );
+    return this.getById(id);
+  }
+
+  static async clearChequeAttachment(id) {
+    await pool.query(
+      `UPDATE transactions
+       SET attachment_name = NULL, attachment_url = NULL,
+           attachment_cloudinary_public_id = NULL, attachment_resource_type = NULL
+       WHERE id = ?`,
+      [id]
+    );
+    return this.getById(id);
+  }
+
   // Delete a transaction and recalculate balances
   static async delete(id) {
     try {
       const transaction = await this.getById(id);
       if (!transaction) {
         return false;
+      }
+      if (transaction.attachment_cloudinary_public_id) {
+        await destroyTransactionChequeImage(
+          transaction.attachment_cloudinary_public_id,
+          transaction.attachment_resource_type || 'image'
+        );
       }
       await pool.query('DELETE FROM transactions WHERE id = ?', [id]);
       await this.recalculateAllBalances();

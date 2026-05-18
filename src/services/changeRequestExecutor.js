@@ -11,6 +11,14 @@ const {
   normalizeTransactionEditPayload,
   assertTransactionEditRequired,
 } = require('../utils/transactionChangePayload');
+const {
+  decodeChequeAttachmentBase64FromBody,
+  saveTransactionChequeAttachmentBuffer,
+  clearTransactionChequeAttachment,
+  normalizePrevCloudinary,
+} = require('../utils/transactionChequeAttachment');
+const { payloadWantsRemoveAttachment } = require('../utils/chequeAttachmentRemove');
+const { clearPdcChequeAttachment } = require('../utils/pdcChequeAttachment');
 const { validateAndBuildPdcUpdate } = require('../utils/pdcChangeRequestPayload');
 const PDC = require('../models/PDC');
 const { destroyPdcChequeImage } = require('../services/cloudinaryPdcUpload');
@@ -79,6 +87,34 @@ async function executeApprovedRequest(reqRow) {
         remarks: norm.remarks,
       });
       if (!updated) throw new Error('Failed to update transaction');
+      if (payload) {
+        if (payloadWantsRemoveAttachment(payload)) {
+          await clearTransactionChequeAttachment(id, txn);
+        } else if (String(norm.paymentType).toLowerCase() === 'cheque') {
+          const decoded = decodeChequeAttachmentBase64FromBody(payload);
+          if (decoded && decoded.error) {
+            throw new Error(decoded.error);
+          }
+          if (decoded && decoded.buffer) {
+            const prevCloudinary = txn.attachment_cloudinary_public_id
+              ? normalizePrevCloudinary({
+                  publicId: txn.attachment_cloudinary_public_id,
+                  resourceType: txn.attachment_resource_type || 'image',
+                })
+              : null;
+            const attachResult = await saveTransactionChequeAttachmentBuffer(
+              id,
+              decoded.buffer,
+              decoded.originalName,
+              prevCloudinary,
+              decoded.mimetype
+            );
+            if (!attachResult.ok) {
+              throw new Error(attachResult.error || 'Failed to save cheque attachment');
+            }
+          }
+        }
+      }
       return;
     }
   }
@@ -162,6 +198,12 @@ async function executeApprovedRequest(reqRow) {
       }
       const updated = await PDC.update(id, built.value);
       if (!updated) throw new Error('Failed to update post-dated cheque');
+      if (payload && payloadWantsRemoveAttachment(payload)) {
+        const clearResult = await clearPdcChequeAttachment(id, row);
+        if (!clearResult.ok) {
+          throw new Error(clearResult.error || 'Failed to remove cheque attachment');
+        }
+      }
       return;
     }
   }

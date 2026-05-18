@@ -107,10 +107,37 @@ function buildPdcAttachmentPayload(pdc) {
   };
 }
 
+/** Daily transaction cheque attachment from DB (image or pdf) */
+function buildTransactionAttachmentPayload(txn) {
+  if (!txn || !txn.attachment_url) return null;
+  const isPdf =
+    txn.attachment_resource_type === 'raw' ||
+    /\.pdf($|\?)/i.test(txn.attachment_name || txn.attachment_url);
+  const fallbackName = isPdf ? 'cheque.pdf' : 'cheque-image';
+  const displayName = (txn.attachment_name && String(txn.attachment_name).trim()) || fallbackName;
+  const cloudinaryUrl = normalizeMediaUrl(txn.attachment_url);
+  const url = isPdf && txn.id != null ? `/transactions/${txn.id}/attachment` : cloudinaryUrl;
+  const { type, mimeType } = inferAttachmentKind({
+    name: displayName,
+    url: cloudinaryUrl,
+    resourceType: txn.attachment_resource_type
+  });
+  return {
+    name: displayName,
+    url,
+    attachmentUrl: url,
+    cloudinaryUrl,
+    type,
+    mimeType: mimeType || (isPdf ? 'application/pdf' : null),
+    resourceType: txn.attachment_resource_type || null
+  };
+}
+
 module.exports = {
   normalizeMediaUrl,
   buildAttachmentPayloadFromParts,
   buildStatementAttachmentPayload,
   buildPdcAttachmentPayload,
+  buildTransactionAttachmentPayload,
   inferAttachmentKind
 };
