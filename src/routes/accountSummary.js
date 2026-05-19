@@ -11,6 +11,7 @@ const {
   parseDailyLedgerApproved,
   shouldPdcAffectBalance
 } = require('../utils/pdcLedgerApproval');
+const { isAvailableBalanceRemarks } = require('../utils/availableBalanceRemarks');
 
 const router = express.Router();
 
@@ -155,6 +156,20 @@ function sortMergedByDateThenId(rows) {
   });
 }
 
+async function fetchLatestStoredAvailableBalance(asOfDate) {
+  const result = await pool.query(
+    `SELECT balance
+     FROM transactions
+     WHERE LOWER(TRIM(COALESCE(remarks, ''))) LIKE '%available balance%'
+       AND date <= ?
+     ORDER BY date DESC, transaction_time DESC, id DESC
+     LIMIT 1`,
+    [asOfDate]
+  );
+  if (result.rows.length === 0) return null;
+  return formatAmount(result.rows[0].balance);
+}
+
 function numericSortIdValue(row) {
   if (!row) return Number.MAX_SAFE_INTEGER;
   if (typeof row.id === 'number' && Number.isFinite(row.id)) return row.id;
@@ -252,10 +267,14 @@ router.get('/', authenticateToken, async (req, res) => {
         const rowDate = pdc.cheque_date_ymd || toYmd(pdc.cheque_date);
         const isCustomerPdc = isCustomerPdcType(pdc.pdc_type);
         const ledgerApproved = parseDailyLedgerApproved(pdc.daily_ledger_approved);
-        const shouldAffectBalance = isCustomerPdc
-          ? true
-          : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
-        const todayYmd = toYmd(new Date());
+        const isUpcomingDailyTransitionPdc = rowDate > todayYmd;
+        const isGcec = isGcecPdcType(pdc.pdc_type);
+        // Match /api/transactions mapPdcMaturedToSyntheticRow includeInBalance rules.
+        const shouldAffectBalance = isUpcomingDailyTransitionPdc
+          ? isGcec
+          : isCustomerPdc
+            ? true
+            : shouldPdcAffectBalance(pdc.pdc_type, pdc.daily_ledger_approved);
         // GCEC PDC: always debit in ledger display (including upcoming). Customer PDC: always credit.
         const isCredit = isCustomerPdc;
         return {
@@ -332,7 +351,7 @@ router.get('/', authenticateToken, async (req, res) => {
       if (!row || !row.remarks) return false;
       const txnDate = toYmd(row.date);
       if (txnDate > asOfDate) return false;
-      return String(row.remarks).trim().toLowerCase() === 'available balance';
+      return isAvailableBalanceRemarks(row.remarks);
     });
     const latestAvailableBalanceRow =
       availableBalanceRows.length > 0
@@ -357,10 +376,24 @@ router.get('/', authenticateToken, async (req, res) => {
 
     // Current balance: bank statement PDF (Current / Closing balance labels).
     const currentBalance = statementTotals?.currentBalance ?? null;
-    // Available balance: ledger row with remarks "Available Balance" only.
-    const mainAvailableBalance = latestAvailableBalanceRow
+    // Available balance: latest ledger row whose remarks contain "Available Balance"
+    // (same marker as GET /api/transactions), with stored DB / statement fallbacks.
+    let mainAvailableBalance = latestAvailableBalanceRow
       ? formatAmount(latestAvailableBalanceRow.balance)
       : '0.00';
+    if (mainAvailableBalance === '0.00') {
+      const storedAvailableBalance = await fetchLatestStoredAvailableBalance(asOfDate);
+      if (storedAvailableBalance && storedAvailableBalance !== '0.00') {
+        mainAvailableBalance = storedAvailableBalance;
+      }
+    }
+    if (
+      useStatementTotals
+      && statementTotals?.closingAvailableBalance
+      && (mainAvailableBalance === '0.00' || !latestAvailableBalanceRow)
+    ) {
+      mainAvailableBalance = statementTotals.closingAvailableBalance;
+    }
     const availableBalance = mainAvailableBalance;
     // Legacy: ?useStatementTotals=true maps totalBalance to PDF current balance for older clients.
     const responseTotalBalance = useStatementTotals && currentBalance

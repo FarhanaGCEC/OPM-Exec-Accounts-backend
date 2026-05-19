@@ -42,6 +42,7 @@ const router = express.Router();
 
 const PDC_DUE_ID_RE = /^pdc-due-(\d+)$/i;
 const AVAILABLE_BALANCE_BG_COLOR = '#91d34d';
+const { isAvailableBalanceRemarks } = require('../utils/availableBalanceRemarks');
 
 /** Normalize DB/JS dates to YYYY-MM-DD for sorting and comparison */
 function toYmd(d) {
@@ -57,9 +58,8 @@ function toYmd(d) {
 }
 
 function getBalanceCellBgColorByRemarks(remarks) {
-  const normalized = (remarks == null ? '' : String(remarks)).trim().toLowerCase();
-  if (!normalized) return null;
-  return normalized.includes('available balance') ? AVAILABLE_BALANCE_BG_COLOR : null;
+  if (!isAvailableBalanceRemarks(remarks)) return null;
+  return AVAILABLE_BALANCE_BG_COLOR;
 }
 
 function hasOwn(obj, key) {
