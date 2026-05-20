@@ -257,9 +257,9 @@ class StatementService {
      ? parseFloat(updateData.epp_balance) 
       : parseFloat(existing.epp_balance || 0);
 
-    // Validate numeric fields >= 0
-    if (totalDue < 0 || paidAmount < 0 || eppBalance < 0) {
-      throw new Error('Numeric fields must be >= 0');
+    // paid_amount and epp_balance must be >= 0; total_due may be negative (overpayment credit)
+    if (paidAmount < 0 || eppBalance < 0) {
+      throw new Error('paid_amount and epp_balance must be >= 0');
     }
 
     if (updateData.balance_transfer !== undefined && parseFloat(updateData.balance_transfer) < 0) {

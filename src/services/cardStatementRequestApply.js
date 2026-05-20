@@ -63,7 +63,7 @@ function statementPayloadToUpdateData(payload) {
   const bt = p.balance_transfer ?? p.balanceTransfer;
   if (td !== undefined && td !== null && td !== '') {
     const n = normalizeStatementAmount(td);
-    if (Number.isNaN(n) || n < 0) throw new Error('total_due must be a valid number >= 0');
+    if (Number.isNaN(n)) throw new Error('total_due must be a valid number (negative allowed for overpayment credit)');
     u.total_due = n;
   }
   if (pa !== undefined && pa !== null && pa !== '') {

@@ -474,10 +474,10 @@ class StatementController {
 
       if (normTotalDue !== undefined) {
         normTotalDue = normalizeStatementAmount(normTotalDue);
-        if (Number.isNaN(normTotalDue) || normTotalDue < 0) {
+        if (Number.isNaN(normTotalDue)) {
           return res.status(400).json({
             success: false,
-            error: 'total_due/total_payment_due must be a valid number >= 0 (comma separators allowed)'
+            error: 'total_due/total_payment_due must be a valid number (comma separators allowed; negative allowed for overpayment credit)'
           });
         }
       }
