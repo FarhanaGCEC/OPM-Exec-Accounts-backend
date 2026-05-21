@@ -28,9 +28,10 @@ function calculateStatementBalances(totalPaymentDue, paid, epp = 0) {
     };
   }
 
+  const pending = roundToCents(totalDue - totalPaid);
   return {
     total_paid: totalPaid,
-    amount_pending: roundToCents(totalDue - totalPaid),
+    amount_pending: pending > 0 ? pending : 0,
     credit_balance: 0,
   };
 }

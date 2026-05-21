@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { USER_ROLES } = require('../constants/roles');
 const { JWT_SECRET } = require('../middleware/auth');
 const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
+const { canManageCreditCards } = require('../utils/creditCardPermissions');
 
 const router = express.Router();
 
@@ -127,6 +128,7 @@ router.post('/login', async (req, res) => {
           user.role,
           user.sidebarPermissionsStored
         ),
+        canManageCreditCards: canManageCreditCards(user.role),
       },
     });
   } catch (error) {

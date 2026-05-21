@@ -2,6 +2,7 @@ const User = require('../models/User');
 const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
 const { USER_ROLES } = require('../constants/roles');
 const { CHANGE_REQUEST_RESOURCE_TYPES } = require('../constants/changeRequestResourceTypes');
+const { canManageCreditCards } = require('../utils/creditCardPermissions');
 
 async function getProfile(req, res) {
   try {
@@ -19,8 +20,17 @@ async function getProfile(req, res) {
           user.role,
           user.sidebarPermissionsStored
         ),
+        canManageCreditCards: canManageCreditCards(user.role),
       },
     };
+    if (user.role === USER_ROLES.ACCOUNTANT) {
+      payload.user.creditCardDetailsPolicy = {
+        canManageCards: false,
+        canEditStatements: true,
+        canEditPayments: true,
+        hint: 'Accountants cannot create or edit cards on Credit Card Details. Only admin can manage card master records.',
+      };
+    }
     if (user.role === USER_ROLES.USER) {
       payload.user.approvalPolicy = {
         directMutationsBlocked: true,
@@ -32,13 +42,8 @@ async function getProfile(req, res) {
     if (user.role === USER_ROLES.VIEWER) {
       payload.user.creditCardMutationPolicy = {
         directMutationsAllowed: true,
-        scopes: [
-          '/api/statements',
-          '/api/credit-card-payments',
-          '/api/cards',
-          '/api/credit-cards',
-        ],
-        hint: 'Viewer can add, edit, and delete on Credit Cards Statements, Payments, and Details only. Other modules remain read-only.',
+        scopes: ['/api/statements', '/api/credit-card-payments'],
+        hint: 'Viewer can add, edit, and delete on Credit Cards Statements and Payments only. Card master (Details) is read-only; only admin can create or edit cards.',
       };
     }
     return res.json(payload);

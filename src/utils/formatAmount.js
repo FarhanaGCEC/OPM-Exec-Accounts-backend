@@ -32,7 +32,9 @@ const formatAmount = (amount) => {
   if (amount === null || amount === undefined || amount === '') return null;
   const rounded = roundToTwoDecimals(amount);
   if (!Number.isFinite(rounded)) return null;
-  return rounded.toFixed(2);
+  // Normalize -0 (e.g. from tiny float residuals) so toFixed never returns "-0.00"
+  const normalized = rounded === 0 ? 0 : rounded;
+  return normalized.toFixed(2);
 };
 
 module.exports = {

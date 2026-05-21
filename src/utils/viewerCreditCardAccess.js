@@ -1,11 +1,9 @@
 const { USER_ROLES, isElevatedUserRole } = require('../constants/roles');
 
-/** API prefixes where viewer may add / edit / delete (credit cards menu only). */
+/** API prefixes where viewer may add / edit / delete (statements & payments only; card master is admin-only). */
 const VIEWER_CREDIT_CARD_API_PREFIXES = Object.freeze([
   '/api/statements',
   '/api/credit-card-payments',
-  '/api/cards',
-  '/api/credit-cards',
 ]);
 
 function requestPath(req) {
@@ -20,7 +18,7 @@ function isViewerCreditCardApiPath(req) {
   );
 }
 
-/** Admin, accountant, or viewer on credit-card APIs (direct mutate, no approval queue). */
+/** Admin or accountant for statements/payments; viewer only on statement/payment APIs. Card master (/api/cards) is admin-only via routes. */
 function canDirectMutateCreditCardResources(role, req = null) {
   if (isElevatedUserRole(role)) return true;
   if (role === USER_ROLES.VIEWER && req && isViewerCreditCardApiPath(req)) return true;

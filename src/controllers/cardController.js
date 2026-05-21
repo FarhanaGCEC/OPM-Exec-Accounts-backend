@@ -1,5 +1,37 @@
 const Card = require('../models/Card');
 
+/** Accept snake_case (API docs) or camelCase (frontend) in POST/PUT body. */
+function normalizeCardBody(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const issuing_bank =
+    b.issuing_bank !== undefined ? b.issuing_bank : b.issuingBank;
+  const card_holder =
+    b.card_holder !== undefined ? b.card_holder : b.cardHolder;
+  const card_number =
+    b.card_number !== undefined ? b.card_number : b.cardNumber;
+  const expiry_date =
+    b.expiry_date !== undefined ? b.expiry_date : b.expiryDate;
+  let credit_limit =
+    b.credit_limit !== undefined ? b.credit_limit : b.creditLimit;
+  if (credit_limit === undefined && b.amountLimit !== undefined) {
+    credit_limit = b.amountLimit;
+  }
+  const billing_cycle_days =
+    b.billing_cycle_days !== undefined
+      ? b.billing_cycle_days
+      : b.billingCycleDays;
+  const is_active = b.is_active !== undefined ? b.is_active : b.isActive;
+  return {
+    issuing_bank,
+    card_holder,
+    card_number,
+    expiry_date,
+    credit_limit,
+    billing_cycle_days,
+    is_active,
+  };
+}
+
 class CardController {
   // GET /api/cards - List all cards (both active and inactive by default)
   static async listCards(req, res) {
@@ -42,7 +74,15 @@ class CardController {
   // POST /api/cards - Create new card
   static async createCard(req, res) {
     try {
-      const { issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active } = req.body;
+      const {
+        issuing_bank,
+        card_holder,
+        card_number,
+        expiry_date,
+        credit_limit,
+        billing_cycle_days,
+        is_active,
+      } = normalizeCardBody(req.body);
 
       // Validation
       if (!issuing_bank || !card_holder || !card_number || !expiry_date) {
@@ -120,7 +160,15 @@ class CardController {
   static async updateCard(req, res) {
     try {
       const { id } = req.params;
-      const { issuing_bank, card_holder, card_number, expiry_date, credit_limit, billing_cycle_days, is_active } = req.body;
+      const {
+        issuing_bank,
+        card_holder,
+        card_number,
+        expiry_date,
+        credit_limit,
+        billing_cycle_days,
+        is_active,
+      } = normalizeCardBody(req.body);
 
       // Check if card exists
       const existing = await Card.getById(id);
@@ -176,13 +224,16 @@ class CardController {
       }
 
       const card = await Card.update(id, {
-        issuingBank: issuing_bank,
-        cardHolder: card_holder,
-        cardNumber: card_number,
+        issuingBank:
+          typeof issuing_bank === 'string' ? issuing_bank.trim() : issuing_bank,
+        cardHolder:
+          typeof card_holder === 'string' ? card_holder.trim() : card_holder,
+        cardNumber:
+          typeof card_number === 'string' ? card_number.trim() : card_number,
         expiryDate: expiry_date,
         creditLimit: credit_limit,
         billingCycleDays: billing_cycle_days,
-        isActive: is_active
+        isActive: is_active,
       });
 
       if (!card) {

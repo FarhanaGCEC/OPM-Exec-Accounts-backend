@@ -226,12 +226,13 @@ const fixExistingCardData = async () => {
     );
 
     for (const existingCard of existingCards.rows) {
-      const matchingCard = defaultCardsData.find(
-        card => card.issuingBank === existingCard.issuing_bank && card.cardHolder === existingCard.card_holder
-      );
+      const currentCardNum = (existingCard.card_number || '').trim().replace(/\s/g, '');
+      const matchingCard = defaultCardsData.find((card) => {
+        const expected = card.cardNumber.trim().replace(/\s/g, '');
+        return expected === currentCardNum;
+      });
 
       if (matchingCard) {
-        const currentCardNum = (existingCard.card_number || '').trim().replace(/\s/g, '');
         const expectedCardNum = matchingCard.cardNumber.trim().replace(/\s/g, '');
         const cardNumberNeedsUpdate = currentCardNum.length <= 4 || currentCardNum !== expectedCardNum;
         const expiryNeedsUpdate = !(existingCard.expiry_date || '').match(/^[A-Za-z]{3}-\d{2}$/) ||

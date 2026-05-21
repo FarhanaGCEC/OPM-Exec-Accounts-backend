@@ -20,7 +20,7 @@ function enforceViewerReadOnly(req, res) {
     res.status(403).json({
       success: false,
       error:
-        'Viewer role is read-only outside Credit Cards. Statements, payments, and card details can be changed.',
+        'Viewer role is read-only outside Credit Cards. Statements and payments can be changed; card master (Details) is admin-only.',
       code: 'VIEWER_READ_ONLY',
     });
     return false;
