@@ -7,6 +7,11 @@ const { USER_ROLES } = require('../constants/roles');
 const { queuePdcDelete, queuePdcUpdate } = require('../controllers/pdcChangeRequestQueue');
 
 const { isGcecPdcType, isCustomerPdcType, parseDailyLedgerApproved } = require('../utils/pdcLedgerApproval');
+const {
+  extractApprovalTimeFromBody,
+  buildDailyLedgerApprovedAt,
+  formatApprovalTimeForDisplay
+} = require('../utils/pdcApprovalTime');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 const {
   uploadPdcChequeImage,
@@ -72,6 +77,13 @@ function formatPdcForApi(pdc) {
     dailyLedgerApprovedAtDisplay: formatTimestampForDisplay(pdc.daily_ledger_approved_at),
     pendingGcecLedgerApproval: approvalType && !ledgerOk
   };
+  if (isCustomerPdcType(pdc.pdc_type)) {
+    out.ledgerApprovalTime =
+      ledgerOk && pdc.daily_ledger_approved_at
+        ? formatApprovalTimeForDisplay(pdc.daily_ledger_approved_at) || '09:00:00'
+        : '09:00:00';
+    out.transactionTime = out.ledgerApprovalTime;
+  }
   if (pdc.days_remaining !== undefined) {
     out.daysRemaining = parseInt(pdc.days_remaining, 10) || 0;
   }
@@ -475,60 +487,138 @@ router.delete(
   }
 );
 
+async function patchDailyLedgerApproval(req, res, { timeOnly = false } = {}) {
+  try {
+    const pdcId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(pdcId) || pdcId < 1) {
+      return res.status(400).json({ success: false, error: 'Invalid PDC id' });
+    }
+
+    const body = req.body || {};
+    const { provided: timeProvided, normalized: approvalTime } = extractApprovalTimeFromBody(body);
+    if (timeProvided && !approvalTime) {
+      return res.status(400).json({
+        success: false,
+        error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+      });
+    }
+
+    const raw =
+      body.approved !== undefined
+        ? body.approved
+        : body.dailyLedgerApproved !== undefined
+          ? body.dailyLedgerApproved
+          : undefined;
+    const hasApprovedField = raw !== undefined;
+
+    if (timeOnly && !timeProvided) {
+      return res.status(400).json({
+        success: false,
+        error: 'Body must include transactionTime (HH:mm or HH:mm:ss)'
+      });
+    }
+
+    if (!timeOnly && !hasApprovedField && !timeProvided) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'Body must include approved or dailyLedgerApproved (boolean), and/or transactionTime for Customer PDC'
+      });
+    }
+
+    const existing = await PDC.getById(pdcId);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Post-dated cheque not found' });
+    }
+    if (!isGcecPdcType(existing.pdc_type) && !isCustomerPdcType(existing.pdc_type)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Daily ledger approval applies only to GCEC PDC and Customer PDC'
+      });
+    }
+
+    const isCustomerPdc = isCustomerPdcType(existing.pdc_type);
+    const alreadyApproved = parseDailyLedgerApproved(existing.daily_ledger_approved);
+
+    if ((timeOnly || (!hasApprovedField && timeProvided)) && !isCustomerPdc) {
+      return res.status(400).json({
+        success: false,
+        error: 'Custom approval time applies only to Customer PDC'
+      });
+    }
+
+    if ((timeOnly || (!hasApprovedField && timeProvided)) && !alreadyApproved) {
+      return res.status(400).json({
+        success: false,
+        error: 'Approve the Customer PDC on the daily ledger before setting a custom approval time'
+      });
+    }
+
+    if (timeOnly || (!hasApprovedField && timeProvided)) {
+      const approvedAt = buildDailyLedgerApprovedAt(existing.cheque_date, approvalTime);
+      if (!approvedAt) {
+        return res.status(400).json({ success: false, error: 'Invalid cheque date for approval time' });
+      }
+      const updated = await PDC.setDailyLedgerApprovedAt(pdcId, approvedAt);
+      return res.json({
+        success: true,
+        message: 'Daily ledger approval time updated',
+        data: formatPdcForApi(updated)
+      });
+    }
+
+    const approved = raw === true || raw === 1 || String(raw).toLowerCase() === 'true';
+    let updated = await PDC.setDailyLedgerApproved(pdcId, approved);
+    if (approved && timeProvided && isCustomerPdc) {
+      const approvedAt = buildDailyLedgerApprovedAt(existing.cheque_date, approvalTime);
+      if (!approvedAt) {
+        return res.status(400).json({ success: false, error: 'Invalid cheque date for approval time' });
+      }
+      updated = await PDC.setDailyLedgerApprovedAt(pdcId, approvedAt);
+    }
+
+    let message = approved ? 'Daily ledger marked as approved' : 'Daily ledger approval cleared';
+    if (approved && timeProvided && isCustomerPdc) {
+      message = 'Daily ledger marked as approved with custom time';
+    }
+
+    res.json({
+      success: true,
+      message,
+      data: formatPdcForApi(updated)
+    });
+  } catch (error) {
+    console.error('Error updating daily ledger approval:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update daily ledger approval'
+    });
+  }
+}
+
 /**
  * Approve matured GCEC/Customer PDC on the daily ledger.
  * Body: { "approved": true } or { "dailyLedgerApproved": true }
+ * Customer PDC — optional custom time on approve or after approve:
+ *   { "approved": true, "transactionTime": "14:30" }
+ *   { "transactionTime": "14:30" }  (already approved; updates sort time in Daily Transactions)
  */
 router.patch(
   '/:id/daily-ledger-approved',
   authenticateToken,
   requireElevatedForMutation,
-  async (req, res) => {
-    try {
-      const pdcId = parseInt(req.params.id, 10);
-      if (!Number.isInteger(pdcId) || pdcId < 1) {
-        return res.status(400).json({ success: false, error: 'Invalid PDC id' });
-      }
+  (req, res) => patchDailyLedgerApproval(req, res)
+);
 
-      const raw =
-        req.body.approved !== undefined
-          ? req.body.approved
-          : req.body.dailyLedgerApproved !== undefined
-            ? req.body.dailyLedgerApproved
-            : undefined;
-      if (raw === undefined) {
-        return res.status(400).json({
-          success: false,
-          error: 'Body must include approved or dailyLedgerApproved (boolean)'
-        });
-      }
-
-      const approved = raw === true || raw === 1 || String(raw).toLowerCase() === 'true';
-      const existing = await PDC.getById(pdcId);
-      if (!existing) {
-        return res.status(404).json({ success: false, error: 'Post-dated cheque not found' });
-      }
-      if (!isGcecPdcType(existing.pdc_type) && !isCustomerPdcType(existing.pdc_type)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Daily ledger approval applies only to GCEC PDC and Customer PDC'
-        });
-      }
-
-      const updated = await PDC.setDailyLedgerApproved(pdcId, approved);
-      res.json({
-        success: true,
-        message: approved ? 'Daily ledger marked as approved' : 'Daily ledger approval cleared',
-        data: formatPdcForApi(updated)
-      });
-    } catch (error) {
-      console.error('Error updating daily ledger approval:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message || 'Failed to update daily ledger approval'
-      });
-    }
-  }
+/**
+ * Set or change Customer PDC approval time after approve (same as transactionTime-only on daily-ledger-approved).
+ * Body: { "transactionTime": "14:30" } or { "transaction_time": "14:30:00" }
+ */
+router.patch(
+  '/:id/daily-ledger-approval-time',
+  authenticateToken,
+  requireElevatedForMutation,
+  (req, res) => patchDailyLedgerApproval(req, res, { timeOnly: true })
 );
 
 // Serve the cheque attachment.
@@ -810,6 +900,41 @@ router.post('/', optionalPdcImageMultipart, authenticateToken, async (req, res) 
   }
 });
 
+async function applyCustomerPdcApprovalTimeFromBody(pdcId, pdcRow, body) {
+  const { provided: timeProvided, normalized: approvalTime } = extractApprovalTimeFromBody(body);
+  if (!timeProvided) return { ok: true, pdc: pdcRow, skipped: true };
+  if (!approvalTime) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'transactionTime must be in HH:mm or HH:mm:ss format'
+    };
+  }
+  if (!isCustomerPdcType(pdcRow.pdc_type)) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'transactionTime applies only to Customer PDC'
+    };
+  }
+  if (!parseDailyLedgerApproved(pdcRow.daily_ledger_approved)) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Approve the Customer PDC on the daily ledger before setting approval time'
+    };
+  }
+  const approvedAt = buildDailyLedgerApprovedAt(pdcRow.cheque_date, approvalTime);
+  if (!approvedAt) {
+    return { ok: false, status: 400, error: 'Invalid cheque date for approval time' };
+  }
+  const updated = await PDC.setDailyLedgerApprovedAt(pdcId, approvedAt);
+  if (!updated) {
+    return { ok: false, status: 404, error: 'Post-dated cheque not found' };
+  }
+  return { ok: true, pdc: updated, skipped: false };
+}
+
 const updatePdcHandler = async (req, res) => {
   try {
     const { id } = req.params;
@@ -841,7 +966,25 @@ const updatePdcHandler = async (req, res) => {
       Boolean(req.file && req.file.buffer && req.file.buffer.length) ||
       Boolean(decodedImage && decodedImage.buffer);
 
-    if (hasAttachOp && !bodyHasPdcFieldUpdates(req.body)) {
+    const { provided: timeProvided } = extractApprovalTimeFromBody(req.body);
+    const hasPdcFields = bodyHasPdcFieldUpdates(req.body);
+
+    if (timeProvided && !hasPdcFields && !hasAttachOp) {
+      const timeResult = await applyCustomerPdcApprovalTimeFromBody(id, existing, req.body);
+      if (!timeResult.ok) {
+        return res.status(timeResult.status || 400).json({
+          success: false,
+          error: timeResult.error
+        });
+      }
+      return res.json({
+        success: true,
+        message: 'Daily ledger approval time updated',
+        data: formatPdcForApi(timeResult.pdc)
+      });
+    }
+
+    if (hasAttachOp && !hasPdcFields) {
       const attachResult = await applyPdcChequeAttachmentFromRequest(req, id, existing);
       if (!attachResult.ok) {
         return res.status(attachResult.status || 400).json({
@@ -953,10 +1096,23 @@ const updatePdcHandler = async (req, res) => {
       });
     }
 
-    const full = await PDC.getById(id);
+    let full = await PDC.getById(id);
+    const timeResult = await applyCustomerPdcApprovalTimeFromBody(id, full, req.body);
+    if (!timeResult.ok) {
+      return res.status(timeResult.status || 400).json({
+        success: false,
+        error: timeResult.error
+      });
+    }
+    if (!timeResult.skipped) {
+      full = timeResult.pdc;
+    }
+
     res.json({
       success: true,
-      message: 'Post-dated cheque updated successfully',
+      message: timeResult.skipped
+        ? 'Post-dated cheque updated successfully'
+        : 'Post-dated cheque and approval time updated successfully',
       data: formatPdcForApi(full)
     });
   } catch (error) {
