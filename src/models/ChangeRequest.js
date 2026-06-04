@@ -1,5 +1,20 @@
 const { pool } = require('../config/database');
 
+const LIST_DEFAULT_LIMIT = 200;
+const LIST_MAX_LIMIT = 500;
+
+function clampListLimit(limit) {
+  const n = parseInt(limit, 10);
+  if (!Number.isFinite(n) || n < 1) return LIST_DEFAULT_LIMIT;
+  return Math.min(n, LIST_MAX_LIMIT);
+}
+
+function clampListOffset(offset) {
+  const n = parseInt(offset, 10);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
 function parsePayload(row) {
   if (row.payload == null) return null;
   if (typeof row.payload === 'object') return row.payload;
@@ -39,6 +54,14 @@ function mapRow(row) {
 }
 
 class ChangeRequest {
+  static listLimitParam(limit) {
+    return clampListLimit(limit);
+  }
+
+  static listOffsetParam(offset) {
+    return clampListOffset(offset);
+  }
+
   static async create({
     requesterId,
     action,
@@ -117,36 +140,62 @@ class ChangeRequest {
     return mapRow(result.rows[0] || null);
   }
 
-  static async listForRequester(requesterId) {
+  static async listForRequester(requesterId, { limit, offset } = {}) {
     const rid = Number(requesterId);
     if (!Number.isInteger(rid) || rid < 1) {
       return [];
     }
+    const lim = clampListLimit(limit);
+    const off = clampListOffset(offset);
+    const idResult = await pool.query(
+      `SELECT id FROM change_requests
+       WHERE requester_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [rid, lim, off]
+    );
+    return this._fetchRowsByIds(idResult.rows.map((r) => r.id));
+  }
+
+  /**
+   * List change requests without sorting fat JSON columns in MySQL's sort buffer.
+   * Phase 1: sort/limit narrow id rows; phase 2: fetch full rows by id.
+   */
+  static async listAll({ status, limit, offset } = {}) {
+    const lim = clampListLimit(limit);
+    const off = clampListOffset(offset);
+    let idSql;
+    const params = [];
+    if (status) {
+      idSql = `
+        SELECT id FROM change_requests
+        WHERE status = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?`;
+      params.push(status, lim, off);
+    } else {
+      idSql = `
+        SELECT id FROM change_requests
+        ORDER BY status = 'pending' DESC, created_at DESC
+        LIMIT ? OFFSET ?`;
+      params.push(lim, off);
+    }
+    const idResult = await pool.query(idSql, params);
+    return this._fetchRowsByIds(idResult.rows.map((r) => r.id));
+  }
+
+  static async _fetchRowsByIds(ids) {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
     const result = await pool.query(
       `SELECT cr.*, u.username AS requester_username
        FROM change_requests cr
        LEFT JOIN users u ON u.id = cr.requester_id
-       WHERE cr.requester_id = ?
-       ORDER BY cr.created_at DESC`,
-      [rid]
+       WHERE cr.id IN (${placeholders})`,
+      ids
     );
-    return result.rows.map((r) => mapRow(r));
-  }
-
-  static async listAll({ status } = {}) {
-    let sql = `
-      SELECT cr.*, u.username AS requester_username
-      FROM change_requests cr
-      LEFT JOIN users u ON u.id = cr.requester_id
-    `;
-    const params = [];
-    if (status) {
-      sql += ' WHERE cr.status = ?';
-      params.push(status);
-    }
-    sql += ' ORDER BY cr.status = "pending" DESC, cr.created_at DESC';
-    const result = await pool.query(sql, params);
-    return result.rows.map((r) => mapRow(r));
+    const byId = new Map(result.rows.map((r) => [r.id, r]));
+    return ids.map((id) => mapRow(byId.get(id))).filter(Boolean);
   }
 
   static async countPending() {

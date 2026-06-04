@@ -7,12 +7,24 @@ async function listChangeRequests(req, res) {
   if (status && !['pending', 'approved', 'rejected'].includes(status)) {
     return res.status(400).json({ error: 'Invalid status' });
   }
+  const effectiveLimit = ChangeRequest.listLimitParam(req.query.limit);
+  const effectiveOffset = ChangeRequest.listOffsetParam(req.query.offset);
   try {
     const [requests, pendingCount] = await Promise.all([
-      ChangeRequest.listAll({ status }),
+      ChangeRequest.listAll({
+        status,
+        limit: effectiveLimit,
+        offset: effectiveOffset,
+      }),
       ChangeRequest.countPending(),
     ]);
-    return res.json({ requests, pendingCount });
+    return res.json({
+      requests,
+      pendingCount,
+      limit: effectiveLimit,
+      offset: effectiveOffset,
+      hasMore: requests.length >= effectiveLimit,
+    });
   } catch (error) {
     console.error('listChangeRequests:', error);
     return res.status(500).json({ error: 'Internal server error' });

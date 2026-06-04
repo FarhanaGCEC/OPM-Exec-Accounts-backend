@@ -373,6 +373,11 @@ const initDatabase = async () => {
     `);
     await ensureIndex('change_requests', 'idx_change_requests_status', '`status`');
     await ensureIndex('change_requests', 'idx_change_requests_requester', 'requester_id');
+    await ensureIndex(
+      'change_requests',
+      'idx_change_requests_status_created',
+      '`status`, created_at DESC'
+    );
 
     // Create payables_categories
     await pool.query(`
