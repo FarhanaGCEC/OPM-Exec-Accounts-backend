@@ -8,25 +8,35 @@ function sanitizePublicIdPart(name) {
   return cleaned || 'statement';
 }
 
+function statementsFolderPrefix() {
+  return (process.env.CLOUDINARY_STATEMENTS_FOLDER || 'gcec-card-statements').replace(/^\/+|\/+$/g, '');
+}
+
 /**
- * Upload PDF buffer to Cloudinary as raw file. Returns secure_url and public_id.
+ * Upload statement attachment (PDF raw or image) to Cloudinary.
  */
-function uploadStatementPdf({ buffer, statementId, originalFilename }) {
-  const prefix = (process.env.CLOUDINARY_STATEMENTS_FOLDER || 'gcec-card-statements').replace(/^\/+|\/+$/g, '');
-  const publicId = `${prefix}/${statementId}/${Date.now()}_${sanitizePublicIdPart(originalFilename)}`;
+function uploadStatementAttachment({
+  buffer,
+  pathSegment,
+  originalFilename,
+  resourceType = 'raw',
+}) {
+  const prefix = statementsFolderPrefix();
+  const publicId = `${prefix}/${pathSegment}/${Date.now()}_${sanitizePublicIdPart(originalFilename)}`;
 
   return new Promise((resolve, reject) => {
     const upload = cloudinary.uploader.upload_stream(
       {
         public_id: publicId,
-        resource_type: 'raw'
+        resource_type: resourceType === 'image' ? 'image' : 'raw',
       },
       (error, result) => {
         if (error) reject(error);
         else {
           resolve({
             secure_url: result.secure_url,
-            public_id: result.public_id
+            public_id: result.public_id,
+            resource_type: result.resource_type,
           });
         }
       }
@@ -35,20 +45,37 @@ function uploadStatementPdf({ buffer, statementId, originalFilename }) {
   });
 }
 
-async function destroyStatementPdf(publicId) {
+/** @deprecated use uploadStatementAttachment */
+function uploadStatementPdf({ buffer, statementId, originalFilename }) {
+  return uploadStatementAttachment({
+    buffer,
+    pathSegment: String(statementId),
+    originalFilename,
+    resourceType: 'raw',
+  });
+}
+
+async function destroyStatementAttachment(publicId, resourceType = 'raw') {
   if (!publicId) return;
   try {
     await cloudinary.uploader.destroy(publicId, {
-      resource_type: 'raw',
-      invalidate: true
+      resource_type: resourceType === 'image' ? 'image' : 'raw',
+      invalidate: true,
     });
   } catch (e) {
     console.error('Cloudinary destroy failed:', e.message || e);
   }
 }
 
+/** @deprecated use destroyStatementAttachment */
+async function destroyStatementPdf(publicId) {
+  return destroyStatementAttachment(publicId, 'raw');
+}
+
 module.exports = {
+  uploadStatementAttachment,
   uploadStatementPdf,
+  destroyStatementAttachment,
   destroyStatementPdf,
-  isCloudinaryConfigured
+  isCloudinaryConfigured,
 };

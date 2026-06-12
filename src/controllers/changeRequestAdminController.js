@@ -1,6 +1,9 @@
 const ChangeRequest = require('../models/ChangeRequest');
 const { executeApprovedRequest } = require('../services/changeRequestExecutor');
 const changeRequestEvents = require('../services/changeRequestEvents');
+const {
+  destroyStagedStatementAttachmentFromPayload,
+} = require('../utils/statementPdfAttachment');
 
 async function listChangeRequests(req, res) {
   const status = req.query.status ? String(req.query.status).toLowerCase() : undefined;
@@ -89,13 +92,7 @@ async function approveChangeRequest(req, res) {
       });
     }
 
-    await executeApprovedRequest({
-      action: row.action,
-      resourceType: row.resourceType,
-      resourceId: row.resourceId,
-      requesterId: row.requesterId,
-      payload: row.payload,
-    });
+    await executeApprovedRequest(row);
 
     const updated = await ChangeRequest.setReviewed(id, {
       status: 'approved',
@@ -168,6 +165,14 @@ async function rejectChangeRequest(req, res) {
       reviewedBy: req.user.id,
       reviewNote: reviewNote || null,
     });
+
+    if (row.resourceType === 'card_statement' && row.payload) {
+      try {
+        await destroyStagedStatementAttachmentFromPayload(row.payload);
+      } catch (cleanupErr) {
+        console.error('rejectChangeRequest staged attachment cleanup:', cleanupErr);
+      }
+    }
 
     changeRequestEvents.emit('request_resolved', {
       requestId: id,

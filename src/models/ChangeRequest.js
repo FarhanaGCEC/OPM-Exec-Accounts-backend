@@ -1,4 +1,7 @@
 const { pool } = require('../config/database');
+const {
+  buildChangeRequestAttachmentPreview,
+} = require('../utils/statementPdfAttachment');
 
 const LIST_DEFAULT_LIMIT = 200;
 const LIST_MAX_LIMIT = 500;
@@ -36,13 +39,16 @@ function normalizeResourceId(resourceId) {
 
 function mapRow(row) {
   if (!row) return null;
+  const resourceType = row.resource_type;
+  const payload = parsePayload(row);
   return {
     id: row.id,
     requesterId: row.requester_id,
     action: row.action,
-    resourceType: row.resource_type,
+    resourceType,
     resourceId: row.resource_id,
-    payload: parsePayload(row),
+    payload,
+    attachmentPreview: buildChangeRequestAttachmentPreview(resourceType, payload),
     requestNote: row.request_note,
     status: row.status,
     reviewedBy: row.reviewed_by,

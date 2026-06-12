@@ -9,10 +9,15 @@ const { USER_ROLES } = require('../constants/roles');
 const User = require('../models/User');
 const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
 const {
-  resolveCardStatementRow,
+  validateCardStatementTarget,
   statementPayloadToUpdateData,
   payloadHasRemoveAttachment,
 } = require('../services/cardStatementRequestApply');
+const {
+  payloadHasStatementAttachment,
+  decodeStatementPdfBase64FromPayload,
+  stageStatementAttachmentInPayload,
+} = require('../utils/statementPdfAttachment');
 const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
 const { payloadToCreditCardPaymentUpdate } = require('../utils/creditCardPaymentPayload');
 const {
@@ -150,7 +155,10 @@ async function submitChangeRequest(req, res) {
         }
       }
       try {
-        await resolveCardStatementRow(resourceId, payload && typeof payload === 'object' ? payload : {});
+        await validateCardStatementTarget(
+          resourceId,
+          payload && typeof payload === 'object' ? payload : {}
+        );
       } catch (e) {
         return res.status(400).json({
           error: e.message || 'Invalid card_statement target (need statement id or card id + payload.statementMonth)',
@@ -164,11 +172,24 @@ async function submitChangeRequest(req, res) {
         } catch (err) {
           return res.status(400).json({ error: err.message });
         }
-        if (!payloadHasRemoveAttachment(p) && Object.keys(updateKeys).length === 0) {
+        const hasAttach = payloadHasStatementAttachment(p);
+        const removeAtt = payloadHasRemoveAttachment(p);
+        if (removeAtt && hasAttach) {
+          return res.status(400).json({
+            error: 'Cannot attach and remove statement PDF in the same request',
+          });
+        }
+        if (!removeAtt && Object.keys(updateKeys).length === 0 && !hasAttach) {
           return res.status(400).json({
             error:
-              'For card_statement edit, payload must include fields (e.g. total_due, paid_amount, statement_date as YYYY-MM-DD) and/or removeAttachment: true',
+              'For card_statement edit, payload must include fields (e.g. total_due, paid_amount, statement_date as YYYY-MM-DD), attachmentBase64 (PDF), and/or removeAttachment: true',
           });
+        }
+        if (hasAttach) {
+          const decoded = decodeStatementPdfBase64FromPayload(p);
+          if (decoded && decoded.error) {
+            return res.status(400).json({ error: decoded.error });
+          }
         }
       }
     }
@@ -301,12 +322,23 @@ async function submitChangeRequest(req, res) {
       }
     }
 
+    let storedPayload = payload && typeof payload === 'object' ? { ...payload } : null;
+    if (resourceType === 'card_statement' && storedPayload && action === 'edit') {
+      try {
+        storedPayload = await stageStatementAttachmentInPayload(storedPayload, {
+          requesterId: req.user.id,
+        });
+      } catch (e) {
+        return res.status(400).json({ error: e.message || 'Failed to stage statement attachment' });
+      }
+    }
+
     const created = await ChangeRequest.create({
       requesterId: req.user.id,
       action,
       resourceType,
       resourceId,
-      payload: payload && typeof payload === 'object' ? payload : null,
+      payload: storedPayload,
       requestNote: note ? String(note).trim() : null,
     });
 

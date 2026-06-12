@@ -58,12 +58,31 @@ function buildAttachmentPayloadFromParts(name, url, extras = {}) {
 function buildStatementAttachmentPayload(row) {
   if (!row || !row.id) return null;
   if (row.attachment_url) {
-    return buildAttachmentPayloadFromParts(row.attachment_name, row.attachment_url, {
-      resourceType: 'raw'
+    const cloudinaryUrl = normalizeMediaUrl(row.attachment_url);
+    const displayName = (row.attachment_name && String(row.attachment_name).trim()) || 'statement.pdf';
+    const isPdf =
+      /\.pdf($|\?)/i.test(displayName) ||
+      /\.pdf($|\?)/i.test(cloudinaryUrl || '') ||
+      String(row.attachment_url).includes('/raw/upload/');
+    // PDFs: proxy via API (same as PDC/transactions). No leading /api — frontend baseURL already includes it.
+    const url = isPdf ? `/statements/${row.id}/attachment` : cloudinaryUrl;
+    const { type, mimeType } = inferAttachmentKind({
+      name: displayName,
+      url: cloudinaryUrl,
+      resourceType: isPdf ? 'raw' : 'image',
     });
+    return {
+      name: displayName,
+      url,
+      attachmentUrl: url,
+      cloudinaryUrl,
+      type: isPdf ? 'pdf' : type,
+      mimeType: mimeType || (isPdf ? 'application/pdf' : null),
+      resourceType: isPdf ? 'raw' : 'image',
+    };
   }
   if (row.attachment_storage_key) {
-    const rel = `/api/statements/${row.id}/attachment`;
+    const rel = `/statements/${row.id}/attachment`;
     return {
       name: row.attachment_name || 'statement.pdf',
       url: rel,

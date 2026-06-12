@@ -2,9 +2,15 @@ const User = require('../models/User');
 const ChangeRequest = require('../models/ChangeRequest');
 const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions');
 const {
-  resolveCardStatementRow,
+  validateCardStatementTarget,
   statementPayloadToUpdateData,
+  payloadHasRemoveAttachment,
 } = require('../services/cardStatementRequestApply');
+const {
+  payloadHasStatementAttachment,
+  decodeStatementPdfBase64FromPayload,
+  stageStatementAttachmentInPayload,
+} = require('../utils/statementPdfAttachment');
 const changeRequestEvents = require('../services/changeRequestEvents');
 
 async function assertUserCanQueueStatement(req) {
@@ -43,7 +49,7 @@ async function queueStatementFieldChange(req, res) {
       success: false,
       code: 'MULTIPART_NOT_SUPPORTED_FOR_USER',
       error:
-        'Standard users cannot upload a PDF on this call. Send JSON field changes only; your edit will go to admin for approval. PDFs are attached by an admin (or after approval).',
+        'Standard users cannot upload multipart PDF on this call. Send JSON with field changes and/or attachmentBase64 (PDF, max 20MB); your edit will go to admin for approval.',
     });
   }
 
@@ -55,7 +61,7 @@ async function queueStatementFieldChange(req, res) {
 
   let row;
   try {
-    row = await resolveCardStatementRow(id, payloadIn);
+    row = await validateCardStatementTarget(id, payloadIn);
   } catch (e) {
     return res.status(400).json({ success: false, error: e.message });
   }
@@ -67,12 +73,26 @@ async function queueStatementFieldChange(req, res) {
     return res.status(400).json({ success: false, error: e.message });
   }
 
-  if (Object.keys(updateKeys).length === 0) {
+  const hasAttach = payloadHasStatementAttachment(payloadIn);
+  const removeAtt = payloadHasRemoveAttachment(payloadIn);
+  if (removeAtt && hasAttach) {
+    return res.status(400).json({
+      success: false,
+      error: 'Cannot attach and remove statement PDF in the same request',
+    });
+  }
+  if (Object.keys(updateKeys).length === 0 && !hasAttach) {
     return res.status(400).json({
       success: false,
       error:
-        'No changes to submit. Include at least one field (e.g. total_due, paid_amount, epp_balance, balance_transfer, statement_date, due_date, due_month — same formats as admin PATCH).',
+        'No changes to submit. Include at least one field (e.g. total_due, paid_amount, epp_balance, balance_transfer, statement_date, due_date, due_month), attachmentBase64 (PDF), or removeAttachment: true.',
     });
+  }
+  if (hasAttach) {
+    const decoded = decodeStatementPdfBase64FromPayload(payloadIn);
+    if (decoded && decoded.error) {
+      return res.status(400).json({ success: false, error: decoded.error });
+    }
   }
 
   const note =
@@ -82,13 +102,24 @@ async function queueStatementFieldChange(req, res) {
         ? String(body.requestNote).trim()
         : null;
 
+  let storedPayload = payloadIn;
+  if (hasAttach) {
+    try {
+      storedPayload = await stageStatementAttachmentInPayload(payloadIn, {
+        requesterId: req.user.id,
+      });
+    } catch (e) {
+      return res.status(400).json({ success: false, error: e.message || 'Failed to stage statement attachment' });
+    }
+  }
+
   try {
     const created = await ChangeRequest.create({
       requesterId: req.user.id,
       action: 'edit',
       resourceType: 'card_statement',
       resourceId: id,
-      payload: payloadIn,
+      payload: storedPayload,
       requestNote: note || null,
     });
 
@@ -136,7 +167,7 @@ async function queueStatementAttachmentRemoval(req, res) {
   if (month) payloadIn.statementMonth = month;
 
   try {
-    await resolveCardStatementRow(id, payloadIn);
+    await validateCardStatementTarget(id, payloadIn);
   } catch (e) {
     return res.status(400).json({ success: false, error: e.message });
   }

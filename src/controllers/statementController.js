@@ -6,10 +6,10 @@ const Card = require('../models/Card');
 const StatementService = require('../services/statementService');
 const { formatAmount } = require('../utils/formatAmount');
 const {
-  uploadStatementPdf,
   destroyStatementPdf,
   isCloudinaryConfigured
 } = require('../services/cloudinaryStatementUpload');
+const { saveStatementPdfAttachmentBuffer } = require('../utils/statementPdfAttachment');
 const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
@@ -60,51 +60,12 @@ async function applyStatementPdfWithRow(req, row) {
   if (!req.file) {
     return { ok: true };
   }
-  if (!isCloudinaryConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
-    };
-  }
-  const statementId = row.id;
-  const prevCloudinaryId = row.attachment_cloudinary_public_id;
-  const prevStorageKey = row.attachment_storage_key;
-  const originalName = (req.file.originalname || 'statement.pdf').slice(0, 512);
-  let uploaded;
-  try {
-    uploaded = await uploadStatementPdf({
-      buffer: req.file.buffer,
-      statementId,
-      originalFilename: originalName
-    });
-  } catch (e) {
-    console.error('Cloudinary statement PDF upload error:', e);
-    return {
-      ok: false,
-      status: 502,
-      error: e.message || 'Failed to upload PDF to Cloudinary'
-    };
-  }
-  await Statement.update(statementId, {
-    attachmentName: originalName,
-    attachmentUrl: uploaded.secure_url,
-    attachmentCloudinaryPublicId: uploaded.public_id,
-    attachmentStorageKey: null
-  });
-  if (prevCloudinaryId && prevCloudinaryId !== uploaded.public_id) {
-    await destroyStatementPdf(prevCloudinaryId);
-  }
-  if (prevStorageKey) {
-    const prevPath = path.join(LEGACY_UPLOAD_DIR, prevStorageKey);
-    try {
-      await fs.unlink(prevPath);
-    } catch (e) {
-      if (e.code !== 'ENOENT') console.error('Failed to remove previous statement PDF:', e.message);
-    }
-  }
-  return { ok: true };
+  return saveStatementPdfAttachmentBuffer(
+    row.id,
+    req.file.buffer,
+    req.file.originalname || 'statement.pdf',
+    row
+  );
 }
 
 class StatementController {
