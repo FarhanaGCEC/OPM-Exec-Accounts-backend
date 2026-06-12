@@ -1,10 +1,11 @@
 const path = require('path');
 const fs = require('fs').promises;
+const { pool } = require('../config/database');
 const Statement = require('../models/Statement');
 const Card = require('../models/Card');
 const StatementService = require('../services/statementService');
 const {
-  destroyStatementPdf,
+  destroyStatementAttachmentFully,
   isCloudinaryConfigured,
 } = require('../services/cloudinaryStatementUpload');
 const {
@@ -13,6 +14,8 @@ const {
 } = require('../utils/statementPatchParse');
 const {
   payloadHasStatementAttachment,
+  payloadWantsRemoveStatementAttachment,
+  normalizeCardStatementRequestPayload,
   applyStatementAttachmentToRow,
 } = require('../utils/statementPdfAttachment');
 
@@ -276,13 +279,97 @@ function statementPayloadToUpdateData(payload) {
 }
 
 function payloadHasRemoveAttachment(payload) {
-  if (!payload || typeof payload !== 'object') return false;
-  return payload.removeAttachment === true || payload.remove_attachment === true;
+  return payloadWantsRemoveStatementAttachment(payload);
+}
+
+function parseChangeRequestPayload(raw) {
+  if (raw == null) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function prepareCardStatementChangePayload(action, payload, { envelope } = {}) {
+  const base = payload && typeof payload === 'object' ? payload : {};
+  if (action === 'delete') {
+    return normalizeCardStatementRequestPayload({ ...base, removeAttachment: true }, { envelope });
+  }
+  return normalizeCardStatementRequestPayload(base, { envelope });
+}
+
+function cardStatementPendingTargetsMatch(existingPayload, incomingPayload) {
+  const incomingMonth = normalizeStatementMonth(incomingPayload);
+  if (!incomingMonth) return true;
+  return normalizeStatementMonth(existingPayload) === incomingMonth;
+}
+
+function mergeCardStatementChangePayloads(...rawPayloads) {
+  const normalized = rawPayloads
+    .filter((p) => p && typeof p === 'object')
+    .map((p) => normalizeCardStatementRequestPayload(p));
+
+  if (!normalized.length) return {};
+
+  let wantsRemove = false;
+  let wantsAttach = false;
+  for (const p of normalized) {
+    if (p.removeAttachment === true) wantsRemove = true;
+    if (payloadHasStatementAttachment(p)) wantsAttach = true;
+  }
+  if (wantsRemove && wantsAttach) {
+    const err = new Error(
+      'Conflicting pending statement changes: one request removes the attachment and another adds one'
+    );
+    err.code = 'CONFLICTING_STATEMENT_ATTACHMENT';
+    throw err;
+  }
+
+  let merged = {};
+  for (const p of normalized) {
+    merged = { ...merged, ...p };
+  }
+  return normalizeCardStatementRequestPayload(merged);
+}
+
+/**
+ * If a pending card_statement request exists for the same target, merge payloads instead of superseding.
+ * Returns { id, mergedPayload, mergedNote } or null.
+ */
+async function findPendingCardStatementMergeTarget(resourceId, incomingPayload) {
+  const rid = normalizeResourceId(resourceId);
+  const result = await pool.query(
+    `SELECT id, payload, request_note
+     FROM change_requests
+     WHERE resource_type = 'card_statement' AND resource_id = ? AND status = 'pending'
+       AND action IN ('edit', 'delete')
+     ORDER BY created_at ASC`,
+    [rid]
+  );
+
+  const match = result.rows.find((row) =>
+    cardStatementPendingTargetsMatch(parseChangeRequestPayload(row.payload), incomingPayload)
+  );
+  if (!match) return null;
+
+  const existingPayload = parseChangeRequestPayload(match.payload);
+  const mergedPayload = mergeCardStatementChangePayloads(existingPayload, incomingPayload);
+
+  return {
+    id: match.id,
+    mergedPayload,
+    previousNote: match.request_note,
+  };
 }
 
 async function clearStatementAttachmentRow(row) {
   if (row.attachment_cloudinary_public_id && isCloudinaryConfigured()) {
-    await destroyStatementPdf(row.attachment_cloudinary_public_id);
+    await destroyStatementAttachmentFully(row.attachment_cloudinary_public_id, {
+      name: row.attachment_name,
+      url: row.attachment_url,
+    });
   }
   if (row.attachment_storage_key) {
     const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);
@@ -304,7 +391,9 @@ async function clearStatementAttachmentRow(row) {
  * Apply approved card_statement change request. resourceId = statement UUID or credit card UUID (+ month in payload).
  */
 async function applyApprovedCardStatementRequest({ action, resourceId, payload }) {
-  const p = payload && typeof payload === 'object' ? payload : {};
+  const p = normalizeCardStatementRequestPayload(
+    payload && typeof payload === 'object' ? payload : {}
+  );
   const row = await ensureCardStatementRow(resourceId, p);
 
   if (action === 'delete') {
@@ -327,15 +416,15 @@ async function applyApprovedCardStatementRequest({ action, resourceId, payload }
     if (Object.keys(updateData).length > 0) {
       await StatementService.updateStatement(row.id, updateData);
     }
-    if (hasAttach) {
+    if (removeAtt) {
+      const fresh = await Statement.getById(row.id);
+      await clearStatementAttachmentRow(fresh);
+    } else if (hasAttach) {
       const fresh = await Statement.getById(row.id);
       const saveResult = await applyStatementAttachmentToRow(row.id, p, fresh);
       if (!saveResult.ok) {
         throw new Error(saveResult.error || 'Failed to save statement attachment');
       }
-    } else if (removeAtt) {
-      const fresh = await Statement.getById(row.id);
-      await clearStatementAttachmentRow(fresh);
     }
     return;
   }
@@ -349,5 +438,8 @@ module.exports = {
   resolveCardStatementRow,
   statementPayloadToUpdateData,
   payloadHasRemoveAttachment,
+  prepareCardStatementChangePayload,
+  mergeCardStatementChangePayloads,
+  findPendingCardStatementMergeTarget,
   applyApprovedCardStatementRequest,
 };

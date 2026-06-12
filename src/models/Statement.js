@@ -112,6 +112,27 @@ class Statement {
     }
   }
 
+  /** Attachment download — no card JOIN (works even if card row is missing/inactive). */
+  static async getAttachmentRowById(id) {
+    const result = await pool.query(
+      `SELECT id, credit_card_id, statement_month, attachment_name, attachment_storage_key,
+              attachment_url, attachment_cloudinary_public_id
+       FROM card_statements WHERE id = ?`,
+      [id]
+    );
+    return result.rows[0] || null;
+  }
+
+  static async getAttachmentRowByCardAndMonth(cardId, statementMonth) {
+    const result = await pool.query(
+      `SELECT id, credit_card_id, statement_month, attachment_name, attachment_storage_key,
+              attachment_url, attachment_cloudinary_public_id
+       FROM card_statements WHERE credit_card_id = ? AND statement_month = ?`,
+      [cardId, statementMonth]
+    );
+    return result.rows[0] || null;
+  }
+
   // Get statement by ID
   static async getById(id) {
     try {

@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs').promises;
 const { randomUUID } = require('crypto');
+const { payloadWantsRemoveAttachment } = require('./chequeAttachmentRemove');
 const Statement = require('../models/Statement');
 const {
   uploadStatementAttachment,
@@ -11,6 +12,13 @@ const {
 const MAX_STATEMENT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif']);
+
+/** Existing Cloudinary/CDN URLs echoed from the form are not new uploads. */
+function isRemoteAttachmentReference(value) {
+  const s = String(value || '').trim();
+  if (!s || /^data:/i.test(s)) return false;
+  return /^https?:\/\//i.test(s) || s.startsWith('//');
+}
 
 function filenameFromPayload(payload, fallback = 'statement.pdf') {
   return String(
@@ -51,7 +59,7 @@ function extractInlineAttachmentRaw(payload) {
   }
 
   const att = payload.attachment;
-  if (typeof att === 'string' && att.trim()) {
+  if (typeof att === 'string' && att.trim() && !isRemoteAttachmentReference(att)) {
     return { raw: att, filename: filenameFromPayload(payload) };
   }
   if (att && typeof att === 'object') {
@@ -67,6 +75,9 @@ function extractInlineAttachmentRaw(payload) {
       /^data:/i.test(String(att.url))
     ) {
       raw = att.url;
+    }
+    if (raw !== undefined && raw !== null && isRemoteAttachmentReference(raw)) {
+      raw = null;
     }
     if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
       return {
@@ -101,6 +112,104 @@ function resolveStagedStatementAttachment(payload) {
 
 function payloadHasStatementAttachment(payload) {
   return Boolean(extractInlineAttachmentRaw(payload) || resolveStagedStatementAttachment(payload));
+}
+
+function isTruthyRemoveFlag(value) {
+  if (value === true || value === 1) return true;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'yes';
+  }
+  return false;
+}
+
+/** Detect remove intent for card statement attachments (broader than cheque helper). */
+function payloadWantsRemoveStatementAttachment(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (payloadWantsRemoveAttachment(input)) return true;
+
+  const extraKeys = [
+    'deleteAttachment',
+    'delete_attachment',
+    'removeImage',
+    'remove_image',
+    'removeStatementAttachment',
+    'remove_statement_attachment',
+    'deleteStatementAttachment',
+    'delete_statement_attachment',
+  ];
+  for (const key of extraKeys) {
+    if (isTruthyRemoveFlag(input[key])) return true;
+  }
+
+  if (input.attachment === null || input.attachment === '') return true;
+
+  const att = input.attachment;
+  if (att && typeof att === 'object') {
+    const flags = [
+      att.remove,
+      att.removed,
+      att.deleted,
+      att.removeAttachment,
+      att.remove_attachment,
+      att.delete,
+    ];
+    if (flags.some((f) => isTruthyRemoveFlag(f))) return true;
+  }
+
+  return false;
+}
+
+const STATEMENT_ATTACHMENT_PAYLOAD_KEYS = [
+  'attachmentBase64',
+  'attachment_base64',
+  'statementPdfBase64',
+  'statement_pdf_base64',
+  'fileBase64',
+  'file_base64',
+  'pdfBase64',
+  'pdf_base64',
+  'base64',
+  'dataUrl',
+  'data_url',
+  'attachment',
+  'stagedStatementAttachment',
+  'staged_statement_attachment',
+  'attachmentFilename',
+  'attachment_filename',
+  'statementPdfFilename',
+  'statement_pdf_filename',
+  'fileName',
+  'file_name',
+  'filename',
+];
+
+function stripStatementAttachmentFieldsFromPayload(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  for (const key of STATEMENT_ATTACHMENT_PAYLOAD_KEYS) {
+    delete payload[key];
+  }
+}
+
+/**
+ * Normalize card_statement change-request payload before queue/apply.
+ * Merges remove flags from POST /api/user/change-requests body root into payload.
+ */
+function normalizeCardStatementRequestPayload(rawPayload, { envelope } = {}) {
+  const base = rawPayload && typeof rawPayload === 'object' ? { ...rawPayload } : {};
+
+  if (envelope && payloadWantsRemoveStatementAttachment(envelope)) {
+    base.removeAttachment = true;
+  }
+  if (payloadWantsRemoveStatementAttachment(base)) {
+    base.removeAttachment = true;
+  }
+
+  if (base.removeAttachment === true) {
+    stripStatementAttachmentFieldsFromPayload(base);
+  }
+
+  return base;
 }
 
 function detectAttachmentKind(buffer, filename, mimetypeFromDataUrl) {
@@ -374,6 +483,8 @@ function buildChangeRequestAttachmentPreview(resourceType, payload) {
 module.exports = {
   MAX_STATEMENT_ATTACHMENT_BYTES,
   payloadHasStatementAttachment,
+  payloadWantsRemoveStatementAttachment,
+  normalizeCardStatementRequestPayload,
   decodeStatementPdfBase64FromPayload,
   stageStatementAttachmentInPayload,
   destroyStagedStatementAttachmentFromPayload,

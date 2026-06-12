@@ -10,6 +10,7 @@ const {
   payloadHasStatementAttachment,
   decodeStatementPdfBase64FromPayload,
   stageStatementAttachmentInPayload,
+  normalizeCardStatementRequestPayload,
 } = require('../utils/statementPdfAttachment');
 const changeRequestEvents = require('../services/changeRequestEvents');
 
@@ -56,7 +57,7 @@ async function queueStatementFieldChange(req, res) {
   const { id } = req.params;
   const { month } = req.query;
   const body = req.body || {};
-  const payloadIn = { ...body };
+  const payloadIn = normalizeCardStatementRequestPayload({ ...body }, { envelope: body });
   if (month) payloadIn.statementMonth = month;
 
   let row;
@@ -81,7 +82,7 @@ async function queueStatementFieldChange(req, res) {
       error: 'Cannot attach and remove statement PDF in the same request',
     });
   }
-  if (Object.keys(updateKeys).length === 0 && !hasAttach) {
+  if (Object.keys(updateKeys).length === 0 && !hasAttach && !removeAtt) {
     return res.status(400).json({
       success: false,
       error:
@@ -136,12 +137,17 @@ async function queueStatementFieldChange(req, res) {
 
     return res.status(202).json({
       success: true,
-      code: 'CHANGE_REQUEST_SUBMITTED',
-      message: 'Your edit was sent for admin approval. It is not applied until approved.',
+      code: created.mergedIntoPending ? 'CHANGE_REQUEST_MERGED' : 'CHANGE_REQUEST_SUBMITTED',
+      message: created.mergedIntoPending
+        ? 'Your edit was merged with your pending request for this statement. Admin will review one combined request.'
+        : 'Your edit was sent for admin approval. It is not applied until approved.',
       request: created,
     });
   } catch (err) {
     console.error('queueStatementFieldChange:', err);
+    if (err && err.code === 'CONFLICTING_STATEMENT_ATTACHMENT') {
+      return res.status(400).json({ success: false, error: err.message, code: err.code });
+    }
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 }

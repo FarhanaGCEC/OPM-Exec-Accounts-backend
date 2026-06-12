@@ -6,7 +6,7 @@ const Card = require('../models/Card');
 const StatementService = require('../services/statementService');
 const { formatAmount } = require('../utils/formatAmount');
 const {
-  destroyStatementPdf,
+  destroyStatementAttachmentFully,
   isCloudinaryConfigured
 } = require('../services/cloudinaryStatementUpload');
 const { saveStatementPdfAttachmentBuffer } = require('../utils/statementPdfAttachment');
@@ -14,6 +14,10 @@ const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
 } = require('../utils/attachmentPayload');
+const {
+  inferCloudinaryResourceType,
+  streamCloudinaryAttachmentResponse,
+} = require('../utils/cloudinaryAttachmentStream');
 const { USER_ROLES } = require('../constants/roles');
 const { canDirectMutateCreditCardResources } = require('../utils/viewerCreditCardAccess');
 const {
@@ -27,9 +31,73 @@ const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements')
 
 async function resolveStatementForAttachment(id, month) {
   if (month) {
-    return Statement.getByCardIdAndMonth(id, month);
+    const row = await Statement.getByCardIdAndMonth(id, month);
+    if (row) return row;
+    return Statement.getAttachmentRowByCardAndMonth(id, month);
   }
-  return Statement.getById(id);
+  const row = await Statement.getById(id);
+  if (row) return row;
+  return Statement.getAttachmentRowById(id);
+}
+
+async function sendStatementAttachmentResponse(res, row) {
+  const mediaUrl = normalizeMediaUrl(row.attachment_url);
+  const hasCloudinary = Boolean(mediaUrl && row.attachment_cloudinary_public_id);
+  const resourceType = inferCloudinaryResourceType({
+    name: row.attachment_name,
+    url: mediaUrl,
+    explicitType: mediaUrl && mediaUrl.includes('/raw/upload/') ? 'raw' : undefined,
+  });
+  const isPdf =
+    resourceType === 'raw' ||
+    /\.pdf($|\?)/i.test(row.attachment_name || '') ||
+    /\.pdf($|\?)/i.test(mediaUrl || '');
+
+  if (mediaUrl && hasCloudinary && isPdf) {
+    const streamed = await streamCloudinaryAttachmentResponse(res, {
+      publicId: row.attachment_cloudinary_public_id,
+      resourceType: 'raw',
+      filename: row.attachment_name || `statement-${row.id}.pdf`,
+      fallbackContentType: 'application/pdf',
+    });
+    if (streamed.ok) return;
+    if (streamed.status && streamed.status >= 400) {
+      return res.status(streamed.status).json({ success: false, error: streamed.error });
+    }
+  }
+
+  if (mediaUrl && !isPdf) {
+    return res.redirect(302, mediaUrl);
+  }
+
+  if (mediaUrl) {
+    return res.redirect(302, mediaUrl);
+  }
+
+  if (!row.attachment_storage_key) {
+    return res.status(404).json({
+      success: false,
+      error: 'No attachment on this statement',
+    });
+  }
+
+  const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);
+  if (!fsSync.existsSync(absPath)) {
+    return res.status(404).json({
+      success: false,
+      error: 'Attachment file missing on server',
+    });
+  }
+
+  const viewName = row.attachment_name || 'statement.pdf';
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
+  return res.sendFile(absPath, (err) => {
+    if (err && !res.headersSent) {
+      console.error('Error sending statement PDF:', err.message);
+      res.status(500).json({ success: false, error: 'Failed to open file' });
+    }
+  });
 }
 
 // Helper function to format date as DD-MM-YY
@@ -951,37 +1019,7 @@ class StatementController {
         });
       }
 
-      if (row.attachment_url) {
-        const mediaUrl = normalizeMediaUrl(row.attachment_url);
-        if (mediaUrl) {
-          return res.redirect(302, mediaUrl);
-        }
-      }
-
-      if (!row.attachment_storage_key) {
-        return res.status(404).json({
-          success: false,
-          error: 'No PDF attached to this statement'
-        });
-      }
-
-      const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);
-      if (!fsSync.existsSync(absPath)) {
-        return res.status(404).json({
-          success: false,
-          error: 'Attachment file missing on server'
-        });
-      }
-
-      const viewName = row.attachment_name || 'statement.pdf';
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(viewName)}"`);
-      return res.sendFile(absPath, (err) => {
-        if (err && !res.headersSent) {
-          console.error('Error sending statement PDF:', err.message);
-          res.status(500).json({ success: false, error: 'Failed to open file' });
-        }
-      });
+      return sendStatementAttachmentResponse(res, row);
     } catch (error) {
       console.error('Error downloading statement PDF:', error);
       res.status(500).json({
@@ -1044,7 +1082,10 @@ class StatementController {
       }
 
       if (row.attachment_cloudinary_public_id && isCloudinaryConfigured()) {
-        await destroyStatementPdf(row.attachment_cloudinary_public_id);
+        await destroyStatementAttachmentFully(row.attachment_cloudinary_public_id, {
+          name: row.attachment_name,
+          url: row.attachment_url,
+        });
       }
       if (row.attachment_storage_key) {
         const absPath = path.join(LEGACY_UPLOAD_DIR, row.attachment_storage_key);

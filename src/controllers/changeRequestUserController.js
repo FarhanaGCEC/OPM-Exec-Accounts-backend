@@ -17,6 +17,7 @@ const {
   payloadHasStatementAttachment,
   decodeStatementPdfBase64FromPayload,
   stageStatementAttachmentInPayload,
+  normalizeCardStatementRequestPayload,
 } = require('../utils/statementPdfAttachment');
 const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
 const { payloadToCreditCardPaymentUpdate } = require('../utils/creditCardPaymentPayload');
@@ -140,7 +141,12 @@ async function submitChangeRequest(req, res) {
       }
     }
 
+    let cardStatementPayload = null;
     if (resourceType === 'card_statement') {
+      cardStatementPayload = normalizeCardStatementRequestPayload(
+        payload && typeof payload === 'object' ? payload : {},
+        { envelope: req.body }
+      );
       if (req.user.role === USER_ROLES.USER) {
         const dbUser = await User.findById(req.user.id);
         if (!dbUser) {
@@ -155,17 +161,14 @@ async function submitChangeRequest(req, res) {
         }
       }
       try {
-        await validateCardStatementTarget(
-          resourceId,
-          payload && typeof payload === 'object' ? payload : {}
-        );
+        await validateCardStatementTarget(resourceId, cardStatementPayload);
       } catch (e) {
         return res.status(400).json({
           error: e.message || 'Invalid card_statement target (need statement id or card id + payload.statementMonth)',
         });
       }
       if (action === 'edit') {
-        const p = payload && typeof payload === 'object' ? payload : {};
+        const p = cardStatementPayload;
         let updateKeys;
         try {
           updateKeys = statementPayloadToUpdateData(p);
@@ -322,7 +325,12 @@ async function submitChangeRequest(req, res) {
       }
     }
 
-    let storedPayload = payload && typeof payload === 'object' ? { ...payload } : null;
+    let storedPayload =
+      resourceType === 'card_statement' && cardStatementPayload
+        ? { ...cardStatementPayload }
+        : payload && typeof payload === 'object'
+          ? { ...payload }
+          : null;
     if (resourceType === 'card_statement' && storedPayload && action === 'edit') {
       try {
         storedPayload = await stageStatementAttachmentInPayload(storedPayload, {
@@ -354,11 +362,17 @@ async function submitChangeRequest(req, res) {
     });
 
     return res.status(201).json({
-      message: 'Request submitted; waiting for admin approval',
+      message: created.mergedIntoPending
+        ? 'Request merged with your pending statement change; waiting for admin approval'
+        : 'Request submitted; waiting for admin approval',
+      code: created.mergedIntoPending ? 'CHANGE_REQUEST_MERGED' : 'CHANGE_REQUEST_SUBMITTED',
       request: created,
     });
   } catch (error) {
     console.error('submitChangeRequest:', error);
+    if (error && error.code === 'CONFLICTING_STATEMENT_ATTACHMENT') {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

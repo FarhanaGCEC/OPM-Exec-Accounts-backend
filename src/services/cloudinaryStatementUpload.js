@@ -67,15 +67,26 @@ async function destroyStatementAttachment(publicId, resourceType = 'raw') {
   }
 }
 
-/** @deprecated use destroyStatementAttachment */
+/** Remove a statement attachment from Cloudinary (images use resource_type image, PDFs use raw). */
+async function destroyStatementAttachmentFully(publicId, { name, url } = {}) {
+  if (!publicId) return;
+  const { inferCloudinaryResourceType } = require('../utils/cloudinaryAttachmentStream');
+  const primary = inferCloudinaryResourceType({ name, url });
+  await destroyStatementAttachment(publicId, primary);
+  const secondary = primary === 'image' ? 'raw' : 'image';
+  await destroyStatementAttachment(publicId, secondary);
+}
+
+/** @deprecated use destroyStatementAttachmentFully or destroyStatementAttachment */
 async function destroyStatementPdf(publicId) {
-  return destroyStatementAttachment(publicId, 'raw');
+  return destroyStatementAttachmentFully(publicId);
 }
 
 module.exports = {
   uploadStatementAttachment,
   uploadStatementPdf,
   destroyStatementAttachment,
+  destroyStatementAttachmentFully,
   destroyStatementPdf,
   isCloudinaryConfigured,
 };

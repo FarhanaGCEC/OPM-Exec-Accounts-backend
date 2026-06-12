@@ -64,8 +64,8 @@ function buildStatementAttachmentPayload(row) {
       /\.pdf($|\?)/i.test(displayName) ||
       /\.pdf($|\?)/i.test(cloudinaryUrl || '') ||
       String(row.attachment_url).includes('/raw/upload/');
-    // PDFs: proxy via API (same as PDC/transactions). No leading /api — frontend baseURL already includes it.
-    const url = isPdf ? `/statements/${row.id}/attachment` : cloudinaryUrl;
+    // Always proxy through API (auth + ?token=). No leading /api — frontend baseURL already includes it.
+    const url = `/statements/${row.id}/attachment`;
     const { type, mimeType } = inferAttachmentKind({
       name: displayName,
       url: cloudinaryUrl,

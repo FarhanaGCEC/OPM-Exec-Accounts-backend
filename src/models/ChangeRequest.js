@@ -80,25 +80,67 @@ class ChangeRequest {
     if (!Number.isInteger(rid) || rid < 1) {
       throw new Error('Invalid requester id');
     }
-    const payloadJson = payload == null ? null : JSON.stringify(payload);
+
+    const rt = normalizeResourceType(resourceType);
+    let storedPayload = payload;
+
+    if (rt === 'card_statement' && ['edit', 'delete'].includes(action)) {
+      const {
+        prepareCardStatementChangePayload,
+        findPendingCardStatementMergeTarget,
+      } = require('../services/cardStatementRequestApply');
+
+      const incomingPayload = prepareCardStatementChangePayload(action, payload);
+      storedPayload = incomingPayload;
+      const mergeTarget = await findPendingCardStatementMergeTarget(resourceId, incomingPayload);
+
+      if (mergeTarget) {
+        const noteParts = [mergeTarget.previousNote, requestNote].filter(
+          (n) => n != null && String(n).trim() !== ''
+        );
+        const mergedNote = noteParts.length ? noteParts.join(' | ') : null;
+
+        await pool.query(
+          `UPDATE change_requests
+           SET payload = ?, request_note = ?, action = 'edit'
+           WHERE id = ? AND status = 'pending'`,
+          [JSON.stringify(mergeTarget.mergedPayload), mergedNote, mergeTarget.id]
+        );
+
+        await this.rejectOtherPending({
+          resourceType: rt,
+          resourceId,
+          exceptId: mergeTarget.id,
+          reviewedBy: null,
+          reviewNote: `Merged into pending request #${mergeTarget.id}`,
+        });
+
+        const merged = await this.findById(mergeTarget.id);
+        if (merged) merged.mergedIntoPending = true;
+        return merged;
+      }
+    }
+
+    const payloadJson = storedPayload == null ? null : JSON.stringify(storedPayload);
     const insertResult = await pool.query(
       `INSERT INTO change_requests
        (requester_id, action, resource_type, resource_id, payload, request_note, status)
        VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [rid, action, resourceType, resourceId, payloadJson, requestNote || null]
+      [rid, action, rt, resourceId, payloadJson, requestNote || null]
     );
     if (!insertResult.insertId) {
       throw new Error('Failed to create change request');
     }
     const newId = insertResult.insertId;
     await this.rejectOtherPending({
-      resourceType,
+      resourceType: rt,
       resourceId,
       exceptId: newId,
       reviewedBy: null,
       reviewNote: `Superseded by newer request #${newId}`,
     });
-    return this.findById(newId);
+    const created = await this.findById(newId);
+    return created;
   }
 
   /**
