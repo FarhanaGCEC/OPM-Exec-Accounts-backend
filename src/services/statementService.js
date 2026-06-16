@@ -306,6 +306,17 @@ class StatementService {
     const paymentStatus = this.calculatePaymentStatus(pendingAmount, finalDueDate);
 
     // Update statement fields (including calculated fields: pending_amount and payment_status)
+    const minPaymentDue =
+      updateData.min_payment_due !== undefined ? parseFloat(updateData.min_payment_due) : undefined;
+
+    if (minPaymentDue !== undefined) {
+      console.log('[STATEMENT] saving min_payment_due to DB', {
+        statementId,
+        previous: existing.min_payment_due,
+        next: minPaymentDue,
+      });
+    }
+
     const updated = await Statement.update(statementId, {
       statementDate: finalStatementDate,
       dueDate: finalDueDate,
@@ -315,7 +326,7 @@ class StatementService {
       paidAmount: paidAmount,
       eppBalance: eppBalance,
       balanceTransfer: updateData.balance_transfer !== undefined ? parseFloat(updateData.balance_transfer) : parseFloat(existing.balance_transfer || 0),
-      minPaymentDue: updateData.min_payment_due !== undefined ? parseFloat(updateData.min_payment_due) : undefined,
+      minPaymentDue,
       pendingAmount: pendingAmount,
       paymentStatus: paymentStatus
     });

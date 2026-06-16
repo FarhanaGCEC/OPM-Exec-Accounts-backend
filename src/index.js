@@ -299,6 +299,9 @@ const startServer = async () => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server is running on http://0.0.0.0:${PORT}`);
       console.log(`Server is also accessible on http://localhost:${PORT}`);
+      console.log(
+        '[DEPLOY] GCEC Accounts API build=2026-06-16-statement-min-payment-due (statements return + save min_payment_due)'
+      );
     });
   } catch (error) {
     console.error('Failed to start server:', error);

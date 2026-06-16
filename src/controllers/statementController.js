@@ -676,6 +676,16 @@ class StatementController {
       if (normBalanceTransfer !== undefined) updateData.balance_transfer = normBalanceTransfer;
       if (normMinPaymentDue !== undefined) updateData.min_payment_due = normMinPaymentDue;
 
+      if (min_payment_due !== undefined) {
+        console.log('[STATEMENT] min_payment_due received', {
+          cardOrStatementId: id,
+          month: month || null,
+          statementId,
+          raw: min_payment_due,
+          normalized: normMinPaymentDue,
+        });
+      }
+
       let statement = await StatementService.updateStatement(statementId, updateData);
 
       if (req.file) {
@@ -738,6 +748,12 @@ class StatementController {
         updated_at: statement.updated_at,
         attachment: buildAttachmentPayload(statement)
       };
+
+      console.log('[STATEMENT] update response min_payment_due', {
+        statementId,
+        dbValue: statement.min_payment_due,
+        responseValue: formattedStatement.min_payment_due,
+      });
 
       res.json({
         success: true,
