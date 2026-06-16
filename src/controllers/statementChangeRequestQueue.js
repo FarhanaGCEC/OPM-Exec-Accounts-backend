@@ -14,7 +14,7 @@ const {
 } = require('../utils/statementPdfAttachment');
 const changeRequestEvents = require('../services/changeRequestEvents');
 
-async function assertUserCanQueueStatement(req) {
+async function assertUserHasCreditCardsPermission(req) {
   const dbUser = await User.findById(req.user.id);
   if (!dbUser) {
     const e = new Error('User not found');
@@ -28,6 +28,10 @@ async function assertUserCanQueueStatement(req) {
     e.status = 403;
     throw e;
   }
+}
+
+async function assertUserCanQueueStatement(req) {
+  return assertUserHasCreditCardsPermission(req);
 }
 
 /**
@@ -86,7 +90,7 @@ async function queueStatementFieldChange(req, res) {
     return res.status(400).json({
       success: false,
       error:
-        'No changes to submit. Include at least one field (e.g. total_due, paid_amount, epp_balance, balance_transfer, statement_date, due_date, due_month), attachmentBase64 (PDF), or removeAttachment: true.',
+        'No changes to submit. Include at least one field (e.g. total_due, paid_amount, epp_balance, balance_transfer, min_payment_due, statement_date, due_date, due_month), attachmentBase64 (PDF), or removeAttachment: true.',
     });
   }
   if (hasAttach) {
@@ -220,6 +224,7 @@ async function queueStatementAttachmentRemoval(req, res) {
 }
 
 module.exports = {
+  assertUserHasCreditCardsPermission,
   queueStatementFieldChange,
   queueStatementAttachmentRemoval,
 };

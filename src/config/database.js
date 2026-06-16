@@ -628,6 +628,7 @@ const initDatabase = async () => {
         pending_amount DECIMAL(15, 2) NOT NULL DEFAULT 0,
         epp_balance DECIMAL(15, 2) NOT NULL DEFAULT 0,
         balance_transfer DECIMAL(15, 2) NOT NULL DEFAULT 0,
+        min_payment_due DECIMAL(15, 2) NOT NULL DEFAULT 0,
         payment_status VARCHAR(10) NOT NULL DEFAULT 'PARTIAL',
         attachment_name VARCHAR(512) NULL,
         attachment_storage_key VARCHAR(255) NULL,
@@ -662,6 +663,11 @@ const initDatabase = async () => {
       if (!(await columnExists('card_statements', 'attachment_cloudinary_public_id'))) {
         await pool.query(
           'ALTER TABLE card_statements ADD COLUMN attachment_cloudinary_public_id VARCHAR(512) NULL'
+        );
+      }
+      if (!(await columnExists('card_statements', 'min_payment_due'))) {
+        await pool.query(
+          'ALTER TABLE card_statements ADD COLUMN min_payment_due DECIMAL(15, 2) NOT NULL DEFAULT 0'
         );
       }
     }

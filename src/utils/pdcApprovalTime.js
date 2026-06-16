@@ -23,7 +23,20 @@ function toChequeDateYmd(chequeDate) {
 /** HH:mm or HH:mm:ss → HH:mm:ss, or null if input absent. Throws-style via null return on invalid when input present. */
 function normalizeApprovalTimeInput(time) {
   if (time == null || String(time).trim() === '') return null;
-  const raw = String(time).trim();
+  let raw = String(time).trim().toLowerCase();
+  const ampm = raw.match(/\s*(am|pm)\s*$/i);
+  if (ampm) {
+    raw = raw.replace(/\s*(am|pm)\s*$/i, '').trim();
+    const parts = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
+    if (!parts) return null;
+    let hour = parseInt(parts[1], 10);
+    const mm = parts[2];
+    const ss = parts[3] || '00';
+    const isPm = ampm[1].toLowerCase() === 'pm';
+    if (hour === 12) hour = isPm ? 12 : 0;
+    else if (isPm) hour += 12;
+    return `${String(hour).padStart(2, '0')}:${mm}:${ss}`;
+  }
   const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
   if (!match) return null;
   const hh = match[1].padStart(2, '0');

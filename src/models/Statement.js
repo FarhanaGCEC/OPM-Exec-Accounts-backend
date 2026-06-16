@@ -24,6 +24,7 @@ class Statement {
             s.pending_amount,
             s.epp_balance,
             s.balance_transfer,
+            s.min_payment_due,
             s.payment_status,
             s.attachment_name,
             s.attachment_storage_key,
@@ -72,6 +73,7 @@ class Statement {
             s.pending_amount,
             s.epp_balance,
             s.balance_transfer,
+            s.min_payment_due,
             s.payment_status,
             s.attachment_name,
             s.attachment_storage_key,
@@ -150,6 +152,7 @@ class Statement {
           s.pending_amount,
           s.epp_balance,
           s.balance_transfer,
+          s.min_payment_due,
           s.payment_status,
           s.attachment_name,
           s.attachment_storage_key,
@@ -199,6 +202,7 @@ class Statement {
           s.pending_amount,
           s.epp_balance,
           s.balance_transfer,
+          s.min_payment_due,
           s.payment_status,
           s.attachment_name,
           s.attachment_storage_key,
@@ -246,6 +250,7 @@ class Statement {
         pendingAmount,
         eppBalance,
         balanceTransfer,
+        minPaymentDue,
         paymentStatus
       } = statementData;
 
@@ -253,8 +258,8 @@ class Statement {
       await pool.query(
         `INSERT INTO card_statements 
          (id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
-          pending_amount, epp_balance, balance_transfer, payment_status) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          pending_amount, epp_balance, balance_transfer, min_payment_due, payment_status) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           creditCardId,
@@ -268,12 +273,13 @@ class Statement {
           pendingAmount || 0,
           eppBalance || 0,
           balanceTransfer || 0,
+          minPaymentDue || 0,
           paymentStatus || 'PARTIAL'
         ]
       );
 
       const fetchResult = await pool.query(
-        `SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, payment_status,
+        `SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, min_payment_due, payment_status,
           attachment_name, attachment_storage_key, attachment_url, attachment_cloudinary_public_id, created_at, updated_at FROM card_statements WHERE id = ?`,
         [id]
       );
@@ -316,6 +322,7 @@ class Statement {
         paidAmount,
         eppBalance,
         balanceTransfer,
+        minPaymentDue,
         pendingAmount,
         paymentStatus,
         attachmentName,
@@ -335,6 +342,7 @@ class Statement {
       if (paidAmount !== undefined) { fields.push('paid_amount = ?'); values.push(paidAmount); }
       if (eppBalance !== undefined) { fields.push('epp_balance = ?'); values.push(eppBalance); }
       if (balanceTransfer !== undefined) { fields.push('balance_transfer = ?'); values.push(balanceTransfer); }
+      if (minPaymentDue !== undefined) { fields.push('min_payment_due = ?'); values.push(minPaymentDue); }
       if (pendingAmount !== undefined) { fields.push('pending_amount = ?'); values.push(pendingAmount); }
       if (paymentStatus !== undefined) { fields.push('payment_status = ?'); values.push(paymentStatus); }
       if (attachmentName !== undefined) { fields.push('attachment_name = ?'); values.push(attachmentName); }

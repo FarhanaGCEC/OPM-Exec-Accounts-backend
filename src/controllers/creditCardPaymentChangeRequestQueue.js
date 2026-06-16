@@ -6,7 +6,7 @@ const { effectiveSidebarPermissions } = require('../constants/sidebarPermissions
 const { payloadToCreditCardPaymentUpdate } = require('../utils/creditCardPaymentPayload');
 const changeRequestEvents = require('../services/changeRequestEvents');
 
-async function assertUserCanQueueCreditCardPayment(req, row) {
+async function assertStandardUserCanMutateCreditCardPayment(req, row) {
   if (req.user.role !== USER_ROLES.USER) return;
   const dbUser = await User.findById(req.user.id);
   if (!dbUser) {
@@ -53,7 +53,7 @@ async function queueCreditCardPaymentDelete(req, res) {
     if (!row) {
       return res.status(404).json({ success: false, error: 'Credit card payment not found' });
     }
-    await assertUserCanQueueCreditCardPayment(req, row);
+    await assertStandardUserCanMutateCreditCardPayment(req, row);
   } catch (e) {
     const status = e.status || 500;
     return res.status(status).json({
@@ -103,7 +103,7 @@ async function queueCreditCardPaymentPut(req, res) {
     if (!row) {
       return res.status(404).json({ success: false, error: 'Credit card payment not found' });
     }
-    await assertUserCanQueueCreditCardPayment(req, row);
+    await assertStandardUserCanMutateCreditCardPayment(req, row);
   } catch (e) {
     const status = e.status || 500;
     return res.status(status).json({
@@ -162,6 +162,7 @@ async function queueCreditCardPaymentPatch(req, res) {
 }
 
 module.exports = {
+  assertStandardUserCanMutateCreditCardPayment,
   queueCreditCardPaymentDelete,
   queueCreditCardPaymentPut,
   queueCreditCardPaymentPatch,

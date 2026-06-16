@@ -35,8 +35,13 @@ async function getProfile(req, res) {
       payload.user.approvalPolicy = {
         directMutationsBlocked: true,
         changeRequestResourceTypes: [...CHANGE_REQUEST_RESOURCE_TYPES],
-        cardStatementQueuedViaPatch:
-          'PATCH/PUT/POST /api/statements/:id (JSON, with Credit Cards permission) returns 202 and creates a pending change request; data is unchanged until admin approves.',
+        creditCardDirectAddEdit: {
+          scopes: ['/api/statements', '/api/credit-card-payments'],
+          hint:
+            'Standard users may add or edit credit card statements and payments directly (with Credit Cards / Customer Credit Card Payments permission). Deletes require admin approval (202).',
+        },
+        cardStatementDeleteQueuedVia:
+          'DELETE /api/statements/:id/attachment and DELETE /api/credit-card-payments/:id return 202 and create a pending change request.',
       };
     }
     if (user.role === USER_ROLES.VIEWER) {

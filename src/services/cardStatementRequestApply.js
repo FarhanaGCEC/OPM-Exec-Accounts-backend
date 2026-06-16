@@ -171,6 +171,8 @@ async function createStatementForCardMonth(cardId, month, payload, card = null) 
   const initEppBalance = updateData.epp_balance !== undefined ? updateData.epp_balance : 0;
   const initBalanceTransfer =
     updateData.balance_transfer !== undefined ? updateData.balance_transfer : 0;
+  const initMinPaymentDue =
+    updateData.min_payment_due !== undefined ? updateData.min_payment_due : 0;
   const initPendingAmount = StatementService.calculatePendingAmount(
     initTotalDue,
     initPaidAmount,
@@ -192,6 +194,7 @@ async function createStatementForCardMonth(cardId, month, payload, card = null) 
     paidAmount: initPaidAmount,
     eppBalance: initEppBalance,
     balanceTransfer: initBalanceTransfer,
+    minPaymentDue: initMinPaymentDue,
     pendingAmount: initPendingAmount,
     paymentStatus: initPaymentStatus,
   });
@@ -255,6 +258,7 @@ function statementPayloadToUpdateData(payload) {
   const pa = p.paid_amount ?? p.paidAmount ?? p.paid;
   const ep = p.epp_balance ?? p.eppBalance ?? p.epp;
   const bt = p.balance_transfer ?? p.balanceTransfer;
+  const mpd = p.min_payment_due ?? p.minPaymentDue;
   if (td !== undefined && td !== null && td !== '') {
     const n = normalizeStatementAmount(td);
     if (Number.isNaN(n)) throw new Error('total_due must be a valid number (negative allowed for overpayment credit)');
@@ -274,6 +278,11 @@ function statementPayloadToUpdateData(payload) {
     const n = normalizeStatementAmount(bt);
     if (Number.isNaN(n) || n < 0) throw new Error('balance_transfer must be a valid number >= 0');
     u.balance_transfer = n;
+  }
+  if (mpd !== undefined && mpd !== null && mpd !== '') {
+    const n = normalizeStatementAmount(mpd);
+    if (Number.isNaN(n) || n < 0) throw new Error('min_payment_due must be a valid number >= 0');
+    u.min_payment_due = n;
   }
   return u;
 }

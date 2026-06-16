@@ -20,6 +20,7 @@ const {
 const { payloadWantsRemoveAttachment } = require('../utils/chequeAttachmentRemove');
 const { clearPdcChequeAttachment } = require('../utils/pdcChequeAttachment');
 const { validateAndBuildPdcUpdate } = require('../utils/pdcChangeRequestPayload');
+const { syncLedgerApprovedAtAfterPdcSave } = require('../utils/pdcLedgerApprovedAtSync');
 const PDC = require('../models/PDC');
 const { destroyPdcChequeImage } = require('../services/cloudinaryPdcUpload');
 
@@ -198,6 +199,7 @@ async function executeApprovedRequest(reqRow) {
       }
       const updated = await PDC.update(id, built.value);
       if (!updated) throw new Error('Failed to update post-dated cheque');
+      await syncLedgerApprovedAtAfterPdcSave(row, updated, payload);
       if (payload && payloadWantsRemoveAttachment(payload)) {
         const clearResult = await clearPdcChequeAttachment(id, row);
         if (!clearResult.ok) {

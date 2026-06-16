@@ -19,7 +19,10 @@ const {
   streamCloudinaryAttachmentResponse,
 } = require('../utils/cloudinaryAttachmentStream');
 const { USER_ROLES } = require('../constants/roles');
-const { canDirectMutateCreditCardResources } = require('../utils/viewerCreditCardAccess');
+const {
+  canDirectAddEditCreditCardResources,
+  canDirectDeleteCreditCardResources,
+} = require('../utils/viewerCreditCardAccess');
 const {
   normalizeStatementAmount,
   parseStatementDateInput,
@@ -405,6 +408,7 @@ class StatementController {
           amount_pending: formatAmount(balances.amount_pending), // Never negative
           credit_balance: formatAmount(balances.credit_balance), // Overpayment amount
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
+          min_payment_due: row.min_payment_due ? formatAmount(row.min_payment_due) : "0.00",
           payment_status: row.payment_status || 'PARTIAL',
           created_at: row.created_at || null,
           updated_at: row.updated_at || null,
@@ -439,21 +443,30 @@ class StatementController {
   //   PUT/PATCH/POST /api/statements/statement-uuid
   //   PUT/PATCH/POST /api/statements/card-uuid?month=2026-01
   // Supports both field name formats:
-  //   - Backend format: total_due, paid_amount, epp_balance
-  //   - Frontend format: total_payment_due, paid, epp
+  //   - Backend format: total_due, paid_amount, epp_balance, min_payment_due
+  //   - Frontend format: total_payment_due, paid, epp, minPaymentDue
   static async updateStatement(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!canDirectMutateCreditCardResources(role, req)) {
-        if (role === USER_ROLES.USER) {
-          const { queueStatementFieldChange } = require('./statementChangeRequestQueue');
-          return queueStatementFieldChange(req, res);
-        }
+      if (!canDirectAddEditCreditCardResources(role, req)) {
         return res.status(403).json({
           success: false,
           error: 'Your role has read-only access and cannot update statements.',
           code: 'FORBIDDEN_ROLE'
         });
+      }
+      if (role === USER_ROLES.USER) {
+        const { assertUserHasCreditCardsPermission } = require('./statementChangeRequestQueue');
+        try {
+          await assertUserHasCreditCardsPermission(req);
+        } catch (e) {
+          const status = e.status || 500;
+          return res.status(status).json({
+            success: false,
+            code: e.code,
+            error: e.message,
+          });
+        }
       }
 
       const { id } = req.params;
@@ -467,6 +480,8 @@ class StatementController {
       const epp_balance = b.epp_balance !== undefined ? b.epp_balance : b.eppBalance;
       const balance_transfer =
         b.balance_transfer !== undefined ? b.balance_transfer : b.balanceTransfer;
+      const min_payment_due =
+        b.min_payment_due !== undefined ? b.min_payment_due : b.minPaymentDue;
       const total_payment_due = b.total_payment_due !== undefined ? b.total_payment_due : b.totalPaymentDue;
       const paid = b.paid;
       const epp = b.epp;
@@ -542,6 +557,17 @@ class StatementController {
         }
       }
 
+      let normMinPaymentDue = undefined;
+      if (min_payment_due !== undefined) {
+        normMinPaymentDue = normalizeStatementAmount(min_payment_due);
+        if (Number.isNaN(normMinPaymentDue) || normMinPaymentDue < 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'min_payment_due must be a valid number >= 0 (comma separators allowed)'
+          });
+        }
+      }
+
       // Get existing statement - support both statement_id and card_id + month
       let existingStatement = null;
       let statementId = id; // Default to treating id as statement_id
@@ -602,6 +628,7 @@ class StatementController {
         const initTotalDue = normTotalDue !== undefined ? normTotalDue : 0;
         const initPaidAmount = normPaidAmount !== undefined ? normPaidAmount : 0;
         const initEppBalance = normEppBalance !== undefined ? normEppBalance : 0;
+        const initMinPaymentDue = normMinPaymentDue !== undefined ? normMinPaymentDue : 0;
         
         // Calculate pending_amount
         const initPendingAmount = StatementService.calculatePendingAmount(initTotalDue, initPaidAmount, initEppBalance);
@@ -621,6 +648,7 @@ class StatementController {
           paidAmount: initPaidAmount,
           eppBalance: initEppBalance,
           balanceTransfer: normBalanceTransfer !== undefined ? normBalanceTransfer : 0,
+          minPaymentDue: initMinPaymentDue,
           pendingAmount: initPendingAmount,
           paymentStatus: initPaymentStatus
         });
@@ -646,6 +674,7 @@ class StatementController {
       if (normPaidAmount !== undefined) updateData.paid_amount = normPaidAmount;
       if (normEppBalance !== undefined) updateData.epp_balance = normEppBalance;
       if (normBalanceTransfer !== undefined) updateData.balance_transfer = normBalanceTransfer;
+      if (normMinPaymentDue !== undefined) updateData.min_payment_due = normMinPaymentDue;
 
       let statement = await StatementService.updateStatement(statementId, updateData);
 
@@ -703,6 +732,7 @@ class StatementController {
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
+        min_payment_due: formatAmount(statement.min_payment_due),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -816,6 +846,7 @@ class StatementController {
           pending_amount: 0,
           epp_balance: 0,
           balance_transfer: 0,
+          min_payment_due: 0,
           payment_status: 'PARTIAL',
           created_at: null,
           updated_at: null,
@@ -871,6 +902,7 @@ class StatementController {
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
+        min_payment_due: formatAmount(statement.min_payment_due),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -897,15 +929,25 @@ class StatementController {
   static async uploadStatementAttachment(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!canDirectMutateCreditCardResources(role, req)) {
-        return res.status(400).json({
+      if (!canDirectAddEditCreditCardResources(role, req)) {
+        return res.status(403).json({
           success: false,
-          code: role === USER_ROLES.USER ? 'APPROVAL_REQUIRED' : 'FORBIDDEN_ROLE',
-          error:
-            role === USER_ROLES.USER
-              ? 'Standard users cannot attach a PDF directly. Ask an admin to attach the file, or submit amount/date changes via PATCH /api/statements/:id (those are queued for approval automatically).'
-              : 'Your role has read-only access and cannot attach statement PDFs.',
+          code: 'FORBIDDEN_ROLE',
+          error: 'Your role has read-only access and cannot attach statement PDFs.',
         });
+      }
+      if (role === USER_ROLES.USER) {
+        const { assertUserHasCreditCardsPermission } = require('./statementChangeRequestQueue');
+        try {
+          await assertUserHasCreditCardsPermission(req);
+        } catch (e) {
+          const status = e.status || 500;
+          return res.status(status).json({
+            success: false,
+            code: e.code,
+            error: e.message,
+          });
+        }
       }
 
       if (!isCloudinaryConfigured()) {
@@ -982,6 +1024,7 @@ class StatementController {
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
+        min_payment_due: formatAmount(statement.min_payment_due),
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -1036,7 +1079,7 @@ class StatementController {
   static async deleteStatementAttachment(req, res) {
     try {
       const role = req.user && req.user.role;
-      if (!canDirectMutateCreditCardResources(role, req)) {
+      if (!canDirectDeleteCreditCardResources(role, req)) {
         if (role === USER_ROLES.USER) {
           const { queueStatementAttachmentRemoval } = require('./statementChangeRequestQueue');
           return queueStatementAttachmentRemoval(req, res);

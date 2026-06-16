@@ -16,7 +16,7 @@ function normalizePdcInput(body = {}) {
     body.partyName ??
     body.party_name;
   return {
-    chequeDate: body.chequeDate ?? body.cheque_date,
+    chequeDate: body.chequeDate ?? body.cheque_date ?? body.date,
     chequeNumber: body.chequeNumber ?? body.cheque_number,
     customerName,
     amount: body.amount,
@@ -107,6 +107,7 @@ function validateAndBuildPdcUpdate(body) {
 const PDC_BODY_FIELD_KEYS = [
   'chequeDate',
   'cheque_date',
+  'date',
   'chequeNumber',
   'cheque_number',
   'customerName',

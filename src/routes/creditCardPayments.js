@@ -5,8 +5,7 @@ const { USER_ROLES } = require('../constants/roles');
 const changeRequestEvents = require('../services/changeRequestEvents');
 const {
   queueCreditCardPaymentDelete,
-  queueCreditCardPaymentPut,
-  queueCreditCardPaymentPatch,
+  assertStandardUserCanMutateCreditCardPayment,
 } = require('../controllers/creditCardPaymentChangeRequestQueue');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
 
@@ -217,11 +216,27 @@ router.post('/', authenticateToken, async (req, res) => {
 
 // Update a credit card payment (full update)
 router.put('/:id', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === USER_ROLES.USER) {
-    return queueCreditCardPaymentPut(req, res);
-  }
   try {
     const { id } = req.params;
+    if (req.user && req.user.role === USER_ROLES.USER) {
+      const row = await CreditCardPayment.getById(id);
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          error: 'Credit card payment not found'
+        });
+      }
+      try {
+        await assertStandardUserCanMutateCreditCardPayment(req, row);
+      } catch (e) {
+        const status = e.status || 500;
+        return res.status(status).json({
+          success: false,
+          code: e.code,
+          error: e.message,
+        });
+      }
+    }
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
     const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 
@@ -321,11 +336,27 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
 // Partial update a credit card payment
 router.patch('/:id', authenticateToken, async (req, res) => {
-  if (req.user && req.user.role === USER_ROLES.USER) {
-    return queueCreditCardPaymentPatch(req, res);
-  }
   try {
     const { id } = req.params;
+    if (req.user && req.user.role === USER_ROLES.USER) {
+      const row = await CreditCardPayment.getById(id);
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          error: 'Credit card payment not found'
+        });
+      }
+      try {
+        await assertStandardUserCanMutateCreditCardPayment(req, row);
+      } catch (e) {
+        const status = e.status || 500;
+        return res.status(status).json({
+          success: false,
+          code: e.code,
+          error: e.message,
+        });
+      }
+    }
     const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
     const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 

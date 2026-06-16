@@ -29,6 +29,7 @@ const {
   mergePdcUpdateWithExisting,
   bodyHasPdcFieldUpdates
 } = require('../utils/pdcChangeRequestPayload');
+const { syncLedgerApprovedAtAfterPdcSave } = require('../utils/pdcLedgerApprovedAtSync');
 
 const MAX_PDC_IMAGE_BYTES = 15 * 1024 * 1024;
 // Accepts cheque scans (images) and signed cheque copies (PDFs).
@@ -102,7 +103,7 @@ function normalizePdcInput(body = {}) {
     body.partyName ??
     body.party_name;
   return {
-    chequeDate: body.chequeDate ?? body.cheque_date,
+    chequeDate: body.chequeDate ?? body.cheque_date ?? body.date,
     chequeNumber: body.chequeNumber ?? body.cheque_number,
     customerName,
     amount: body.amount,
@@ -1097,20 +1098,20 @@ const updatePdcHandler = async (req, res) => {
     }
 
     let full = await PDC.getById(id);
-    const timeResult = await applyCustomerPdcApprovalTimeFromBody(id, full, req.body);
-    if (!timeResult.ok) {
-      return res.status(timeResult.status || 400).json({
+    const syncResult = await syncLedgerApprovedAtAfterPdcSave(existing, full, req.body);
+    if (!syncResult.ok) {
+      return res.status(syncResult.status || 400).json({
         success: false,
-        error: timeResult.error
+        error: syncResult.error
       });
     }
-    if (!timeResult.skipped) {
-      full = timeResult.pdc;
+    if (!syncResult.skipped) {
+      full = syncResult.pdc;
     }
 
     res.json({
       success: true,
-      message: timeResult.skipped
+      message: syncResult.skipped
         ? 'Post-dated cheque updated successfully'
         : 'Post-dated cheque and approval time updated successfully',
       data: formatPdcForApi(full)

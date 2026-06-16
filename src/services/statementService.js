@@ -182,6 +182,7 @@ class StatementService {
           pendingAmount: 0,
           eppBalance: 0,
           balanceTransfer: 0,
+          minPaymentDue: 0,
           paymentStatus: 'PARTIAL'
         };
 
@@ -190,8 +191,8 @@ class StatementService {
         await client.query(
           `INSERT INTO card_statements 
            (id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, 
-            pending_amount, epp_balance, balance_transfer, payment_status) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            pending_amount, epp_balance, balance_transfer, min_payment_due, payment_status) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             statementId,
             statementData.creditCardId,
@@ -205,6 +206,7 @@ class StatementService {
             statementData.pendingAmount,
             statementData.eppBalance,
             statementData.balanceTransfer,
+            statementData.minPaymentDue,
             statementData.paymentStatus
           ]
         );
@@ -266,6 +268,10 @@ class StatementService {
       throw new Error('balance_transfer must be >= 0');
     }
 
+    if (updateData.min_payment_due !== undefined && parseFloat(updateData.min_payment_due) < 0) {
+      throw new Error('min_payment_due must be >= 0');
+    }
+
     // Handle statement_date update: auto-calculate due_date if statement_date changes
     let finalStatementDate = updateData.statement_date || existing.statement_date;
     let finalDueDate = updateData.due_date;
@@ -309,6 +315,7 @@ class StatementService {
       paidAmount: paidAmount,
       eppBalance: eppBalance,
       balanceTransfer: updateData.balance_transfer !== undefined ? parseFloat(updateData.balance_transfer) : parseFloat(existing.balance_transfer || 0),
+      minPaymentDue: updateData.min_payment_due !== undefined ? parseFloat(updateData.min_payment_due) : undefined,
       pendingAmount: pendingAmount,
       paymentStatus: paymentStatus
     });

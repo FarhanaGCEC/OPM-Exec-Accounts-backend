@@ -16,14 +16,14 @@ function requireElevatedForMutation(req, res, next) {
     }
     const message =
       role === USER_ROLES.USER
-        ? 'Standard users cannot edit or delete directly. Submit a request for admin approval.'
+        ? 'Standard users cannot edit or delete this resource directly. Submit a request for admin approval, or use allowed credit card statement/payment add-edit endpoints.'
         : 'Your role has read-only access and cannot edit or delete.';
     return res.status(403).json({
       success: false,
       error: message,
       code: 'APPROVAL_REQUIRED',
       hint:
-        'Queued for approval (202) with the matching sidebar permission (own rows): PATCH/PUT/POST /api/statements/:id; PUT/PATCH/DELETE /api/purchase-bills/:id; PUT/PATCH/DELETE /api/credit-card-payments/:id (customer_credit_card_payments); PUT/PATCH/DELETE /api/transactions/:id (daily_transactions); POST /api/transactions/bulk-delete (daily_transactions, admin/accountant); POST /api/fk-emirates/bulk-delete (admin/accountant); PUT/PATCH/DELETE /api/pdc/:id (post_dated_cheques, JSON only). Standard users may POST /api/credit-card-payments (admin notified). Or POST /api/user/change-requests. Admins: GET /api/admin/change-requests.',
+        'Queued for approval (202) with the matching sidebar permission: DELETE /api/credit-card-payments/:id (customer_credit_card_payments); DELETE /api/statements/:id/attachment; PUT/PATCH/DELETE /api/purchase-bills/:id; PUT/PATCH/DELETE /api/transactions/:id (daily_transactions); POST /api/transactions/bulk-delete (daily_transactions, admin/accountant); POST /api/fk-emirates/bulk-delete (admin/accountant); PUT/PATCH/DELETE /api/pdc/:id (post_dated_cheques, JSON only). Standard users may add/edit /api/statements and /api/credit-card-payments directly. Or POST /api/user/change-requests. Admins: GET /api/admin/change-requests.',
     });
   }
   next();
