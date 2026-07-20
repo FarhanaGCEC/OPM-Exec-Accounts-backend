@@ -7,6 +7,86 @@ function normalizeStatementAmount(raw) {
 }
 
 /**
+ * Parse partial amount entries (paid or EPP) from request body.
+ * Accepts array of numbers or { amount, paid_at?, note? } objects, or JSON string (multipart).
+ */
+function parseAmountEntriesInput(raw, fieldName) {
+  if (raw === undefined) {
+    return { ok: true, entries: undefined, total: undefined };
+  }
+  if (raw === null || raw === '') {
+    return { ok: true, entries: [], total: 0 };
+  }
+  let value = raw;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return { ok: false, error: `${fieldName} must be a JSON array when sent as a string` };
+    }
+  }
+  if (!Array.isArray(value)) {
+    return { ok: false, error: `${fieldName} must be an array of amounts or { amount } objects` };
+  }
+
+  const entries = [];
+  let total = 0;
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    let amountRaw;
+    let paidAt = null;
+    let note = null;
+    if (item != null && typeof item === 'object' && !Array.isArray(item)) {
+      amountRaw = item.amount !== undefined ? item.amount : item.paid;
+      paidAt = item.paid_at != null ? item.paid_at : item.paidAt != null ? item.paidAt : null;
+      note = item.note != null ? item.note : null;
+    } else {
+      amountRaw = item;
+    }
+    const amount = normalizeStatementAmount(amountRaw);
+    if (Number.isNaN(amount) || amount < 0) {
+      return {
+        ok: false,
+        error: `${fieldName}[${i}].amount must be a valid number >= 0 (comma separators allowed)`,
+      };
+    }
+    if (paidAt != null && paidAt !== '') {
+      const s = String(paidAt).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        return {
+          ok: false,
+          error: `${fieldName}[${i}].paid_at must be YYYY-MM-DD when provided`,
+        };
+      }
+      paidAt = s;
+    } else {
+      paidAt = null;
+    }
+    entries.push({
+      amount,
+      paid_at: paidAt,
+      note: note != null && String(note).trim() !== '' ? String(note).trim().slice(0, 255) : null,
+      sort_order: i,
+    });
+    total = Math.round((total + amount) * 100) / 100;
+  }
+
+  return { ok: true, entries, total };
+}
+
+function parsePaymentsInput(raw) {
+  const parsed = parseAmountEntriesInput(raw, 'payments');
+  if (!parsed.ok) return parsed;
+  return { ok: true, payments: parsed.entries, total: parsed.total };
+}
+
+function parseEppPaymentsInput(raw) {
+  const parsed = parseAmountEntriesInput(raw, 'epp_payments');
+  if (!parsed.ok) return parsed;
+  return { ok: true, epp_payments: parsed.entries, total: parsed.total };
+}
+
+/**
  * Accept YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YY (same pattern as list formatDateDDMMYY)
  */
 function parseStatementDateInput(raw) {
@@ -54,4 +134,7 @@ function parseStatementDateInput(raw) {
 module.exports = {
   normalizeStatementAmount,
   parseStatementDateInput,
+  parseAmountEntriesInput,
+  parsePaymentsInput,
+  parseEppPaymentsInput,
 };

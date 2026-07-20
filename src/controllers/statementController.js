@@ -3,6 +3,8 @@ const fsSync = require('fs');
 const fs = require('fs').promises;
 const Statement = require('../models/Statement');
 const Card = require('../models/Card');
+const CardStatementPayment = require('../models/CardStatementPayment');
+const CardStatementEpp = require('../models/CardStatementEpp');
 const StatementService = require('../services/statementService');
 const { formatAmount } = require('../utils/formatAmount');
 const {
@@ -26,8 +28,29 @@ const {
 const {
   normalizeStatementAmount,
   parseStatementDateInput,
+  parsePaymentsInput,
+  parseEppPaymentsInput,
 } = require('../utils/statementPatchParse');
 const { calculateStatementBalances } = require('../utils/statementAmounts');
+
+/** Format amount-entry breakdown for API; synthesize single row from total when no child rows yet. */
+function formatAmountEntriesForApi(entryRows, totalAmount) {
+  const rows = Array.isArray(entryRows) ? entryRows : [];
+  if (rows.length > 0) {
+    return rows.map((p) => ({
+      id: p.id || null,
+      amount: formatAmount(p.amount),
+      paid_at: p.paid_at || null,
+      note: p.note || null,
+      sort_order: p.sort_order != null ? p.sort_order : 0,
+    }));
+  }
+  const total = parseFloat(totalAmount) || 0;
+  if (total > 0) {
+    return [{ id: null, amount: formatAmount(total), paid_at: null, note: null, sort_order: 0 }];
+  }
+  return [];
+}
 
 /** Older attachments saved on disk before Cloudinary */
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
@@ -308,6 +331,10 @@ class StatementController {
 
       const statements = allStatements;
 
+      const statementIds = statements.map((r) => r.id).filter(Boolean);
+      const paymentsByStatementId = await CardStatementPayment.listByStatementIds(statementIds);
+      const eppByStatementId = await CardStatementEpp.listByStatementIds(statementIds);
+
       // Format statements for display
       // If card doesn't have statement, calculate default values based on statement_month and card's billing cycle
       const formattedStatements = statements.map(row => {
@@ -384,6 +411,8 @@ class StatementController {
         
         // Format response to match table structure (matching image headers)
         const balances = calculateStatementBalances(row.total_due, row.paid_amount, row.epp_balance);
+        const paymentRows = row.id ? paymentsByStatementId[row.id] || [] : [];
+        const eppRows = row.id ? eppByStatementId[row.id] || [] : [];
         const formatted = {
           // Card details (always present - from cards table)
           issuing_bank: row.issuing_bank || null,
@@ -404,7 +433,9 @@ class StatementController {
           due_month: calculatedDueMonth || (row.due_date ? getMonthAbbreviation(row.due_date) : null),
           total_payment_due: row.total_due ? formatAmount(row.total_due) : "0.00", // Matches "Total Payment Due"
           paid: row.paid_amount ? formatAmount(row.paid_amount) : "0.00", // Matches "Paid"
+          payments: formatAmountEntriesForApi(paymentRows, row.paid_amount),
           epp: row.epp_balance ? formatAmount(row.epp_balance) : "0.00", // Matches "EPP"
+          epp_payments: formatAmountEntriesForApi(eppRows, row.epp_balance),
           amount_pending: formatAmount(balances.amount_pending), // Never negative
           credit_balance: formatAmount(balances.credit_balance), // Overpayment amount
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
@@ -489,6 +520,36 @@ class StatementController {
       let normTotalDue = total_due !== undefined ? total_due : total_payment_due;
       let normPaidAmount = paid_amount !== undefined ? paid_amount : paid;
       let normEppBalance = epp_balance !== undefined ? epp_balance : epp;
+
+      const paymentsParse = parsePaymentsInput(
+        b.payments !== undefined ? b.payments : b.partial_payments
+      );
+      if (!paymentsParse.ok) {
+        return res.status(400).json({
+          success: false,
+          error: paymentsParse.error,
+        });
+      }
+      let parsedPayments = paymentsParse.payments;
+      if (parsedPayments !== undefined) {
+        // payments array is source of truth for paid total
+        normPaidAmount = paymentsParse.total;
+      }
+
+      const eppPaymentsParse = parseEppPaymentsInput(
+        b.epp_payments !== undefined ? b.epp_payments : b.partial_epp
+      );
+      if (!eppPaymentsParse.ok) {
+        return res.status(400).json({
+          success: false,
+          error: eppPaymentsParse.error,
+        });
+      }
+      let parsedEppPayments = eppPaymentsParse.epp_payments;
+      if (parsedEppPayments !== undefined) {
+        // epp_payments array is source of truth for epp total
+        normEppBalance = eppPaymentsParse.total;
+      }
 
       let parsedStatementDate = undefined;
       if (statement_date !== undefined) {
@@ -675,6 +736,8 @@ class StatementController {
       if (normEppBalance !== undefined) updateData.epp_balance = normEppBalance;
       if (normBalanceTransfer !== undefined) updateData.balance_transfer = normBalanceTransfer;
       if (normMinPaymentDue !== undefined) updateData.min_payment_due = normMinPaymentDue;
+      if (parsedPayments !== undefined) updateData.payments = parsedPayments;
+      if (parsedEppPayments !== undefined) updateData.epp_payments = parsedEppPayments;
 
       if (min_payment_due !== undefined) {
         console.log('[STATEMENT] min_payment_due received', {
@@ -718,6 +781,8 @@ class StatementController {
         statement.paid_amount,
         statement.epp_balance
       );
+      const paymentRows = await CardStatementPayment.listByStatementId(statement.id);
+      const eppRows = await CardStatementEpp.listByStatementId(statement.id);
       const formattedStatement = {
         // Card details
         issuing_bank: statement.issuing_bank,
@@ -738,7 +803,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
@@ -770,7 +837,7 @@ class StatementController {
         });
       }
 
-      if (error.message.includes('must be >= 0')) {
+      if (error.message.includes('must be >= 0') || error.message.includes('payment amount')) {
         return res.status(400).json({
           success: false,
           error: error.message
@@ -894,6 +961,12 @@ class StatementController {
         statement.paid_amount,
         statement.epp_balance
       );
+      const paymentRows = statement.id
+        ? await CardStatementPayment.listByStatementId(statement.id)
+        : [];
+      const eppRows = statement.id
+        ? await CardStatementEpp.listByStatementId(statement.id)
+        : [];
       const formattedStatement = {
         // Card details
         issuing_bank: statement.issuing_bank,
@@ -914,7 +987,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
@@ -1021,6 +1096,8 @@ class StatementController {
         statement.paid_amount,
         statement.epp_balance
       );
+      const paymentRows = await CardStatementPayment.listByStatementId(statement.id);
+      const eppRows = await CardStatementEpp.listByStatementId(statement.id);
       const formattedStatement = {
         issuing_bank: statement.issuing_bank,
         card_holder: statement.card_holder,
@@ -1036,7 +1113,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
         epp: formatAmount(statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),

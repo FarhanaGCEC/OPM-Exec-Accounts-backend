@@ -300,7 +300,7 @@ const startServer = async () => {
       console.log(`Server is running on http://0.0.0.0:${PORT}`);
       console.log(`Server is also accessible on http://localhost:${PORT}`);
       console.log(
-        '[DEPLOY] GCEC Accounts API build=2026-06-16-statement-min-payment-due (statements return + save min_payment_due)'
+        '[DEPLOY] GCEC Accounts API build=2026-07-20-statement-partial-epp (statements accept epp_payments[] breakdown)'
       );
     });
   } catch (error) {

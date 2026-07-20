@@ -1,5 +1,7 @@
 const Statement = require('../models/Statement');
 const Card = require('../models/Card');
+const CardStatementPayment = require('../models/CardStatementPayment');
+const CardStatementEpp = require('../models/CardStatementEpp');
 const { pool } = require('../config/database');
 const { randomUUID } = require('crypto');
 const { calculateStatementBalances } = require('../utils/statementAmounts');
@@ -330,6 +332,25 @@ class StatementService {
       pendingAmount: pendingAmount,
       paymentStatus: paymentStatus
     });
+
+    // Replace partial payment breakdown when provided (or when only paid total was sent)
+    if (updateData.payments !== undefined) {
+      await CardStatementPayment.replaceForStatement(statementId, updateData.payments);
+    } else if (updateData.paid_amount !== undefined) {
+      // Legacy single paid: keep breakdown as one row matching the total
+      await CardStatementPayment.replaceForStatement(statementId, [
+        { amount: paidAmount, sort_order: 0 },
+      ]);
+    }
+
+    // Replace partial EPP breakdown when provided (or when only epp total was sent)
+    if (updateData.epp_payments !== undefined) {
+      await CardStatementEpp.replaceForStatement(statementId, updateData.epp_payments);
+    } else if (updateData.epp_balance !== undefined) {
+      await CardStatementEpp.replaceForStatement(statementId, [
+        { amount: eppBalance, sort_order: 0 },
+      ]);
+    }
 
     // Fetch updated statement with card details
     const finalStatement = await Statement.getById(statementId);

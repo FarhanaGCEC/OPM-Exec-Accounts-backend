@@ -154,6 +154,32 @@ CREATE TABLE IF NOT EXISTS card_statements (
   CONSTRAINT fk_card_statements_card FOREIGN KEY (credit_card_id) REFERENCES credit_cards_new(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS card_statement_payments (
+  id CHAR(36) PRIMARY KEY,
+  statement_id CHAR(36) NOT NULL,
+  amount DECIMAL(15, 2) NOT NULL,
+  paid_at DATE NULL,
+  note VARCHAR(255) NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_card_statement_payments_statement (statement_id),
+  CONSTRAINT fk_card_statement_payments_statement
+    FOREIGN KEY (statement_id) REFERENCES card_statements(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS card_statement_epp_payments (
+  id CHAR(36) PRIMARY KEY,
+  statement_id CHAR(36) NOT NULL,
+  amount DECIMAL(15, 2) NOT NULL,
+  paid_at DATE NULL,
+  note VARCHAR(255) NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_card_statement_epp_payments_statement (statement_id),
+  CONSTRAINT fk_card_statement_epp_payments_statement
+    FOREIGN KEY (statement_id) REFERENCES card_statements(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Compatibility for older MySQL versions (no DEFAULT(UUID()) support)
 DELIMITER $$
 DROP TRIGGER IF EXISTS trg_credit_cards_new_uuid$$

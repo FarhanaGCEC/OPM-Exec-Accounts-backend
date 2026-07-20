@@ -672,6 +672,46 @@ const initDatabase = async () => {
       }
     }
 
+    // Partial payments breakdown for card_statements.paid_amount
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS card_statement_payments (
+        id CHAR(36) PRIMARY KEY,
+        statement_id CHAR(36) NOT NULL,
+        amount DECIMAL(15, 2) NOT NULL,
+        paid_at DATE NULL,
+        note VARCHAR(255) NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_card_statement_payments_statement
+          FOREIGN KEY (statement_id) REFERENCES card_statements(id) ON DELETE CASCADE
+      )
+    `);
+    await ensureIndex(
+      'card_statement_payments',
+      'idx_card_statement_payments_statement',
+      'statement_id'
+    );
+
+    // Partial EPP breakdown for card_statements.epp_balance
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS card_statement_epp_payments (
+        id CHAR(36) PRIMARY KEY,
+        statement_id CHAR(36) NOT NULL,
+        amount DECIMAL(15, 2) NOT NULL,
+        paid_at DATE NULL,
+        note VARCHAR(255) NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_card_statement_epp_payments_statement
+          FOREIGN KEY (statement_id) REFERENCES card_statements(id) ON DELETE CASCADE
+      )
+    `);
+    await ensureIndex(
+      'card_statement_epp_payments',
+      'idx_card_statement_epp_payments_statement',
+      'statement_id'
+    );
+
     await seedDefaultCreditCardsNew();
     await fixExistingCardData();
 

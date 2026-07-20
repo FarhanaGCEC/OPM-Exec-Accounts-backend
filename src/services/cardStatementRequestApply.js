@@ -11,6 +11,8 @@ const {
 const {
   normalizeStatementAmount,
   parseStatementDateInput,
+  parsePaymentsInput,
+  parseEppPaymentsInput,
 } = require('../utils/statementPatchParse');
 const {
   payloadHasStatementAttachment,
@@ -283,6 +285,20 @@ function statementPayloadToUpdateData(payload) {
     const n = normalizeStatementAmount(mpd);
     if (Number.isNaN(n) || n < 0) throw new Error('min_payment_due must be a valid number >= 0');
     u.min_payment_due = n;
+  }
+  const paymentsRaw = p.payments !== undefined ? p.payments : p.partial_payments;
+  if (paymentsRaw !== undefined) {
+    const parsed = parsePaymentsInput(paymentsRaw);
+    if (!parsed.ok) throw new Error(parsed.error);
+    u.payments = parsed.payments;
+    u.paid_amount = parsed.total;
+  }
+  const eppPaymentsRaw = p.epp_payments !== undefined ? p.epp_payments : p.partial_epp;
+  if (eppPaymentsRaw !== undefined) {
+    const parsed = parseEppPaymentsInput(eppPaymentsRaw);
+    if (!parsed.ok) throw new Error(parsed.error);
+    u.epp_payments = parsed.epp_payments;
+    u.epp_balance = parsed.total;
   }
   return u;
 }
