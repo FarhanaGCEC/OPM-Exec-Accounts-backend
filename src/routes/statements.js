@@ -2,6 +2,8 @@ const express = require('express');
 const StatementController = require('../controllers/statementController');
 const { authenticateToken, authenticateTokenOrQuery } = require('../middleware/auth');
 const { requireElevatedForMutation } = require('../middleware/requireElevatedForMutation');
+const { authorizeRoles } = require('../middleware/authorizeRoles');
+const { USER_ROLES } = require('../constants/roles');
 const {
   statementPdfUploadMiddleware,
   optionalStatementPdfMultipart
@@ -32,6 +34,14 @@ router.post(
   requireElevatedForMutation,
   validateMonthFormat,
   StatementController.initializeStatements
+);
+
+// POST /api/statements/backfill-available-limit — extract Available Limit from existing PDFs
+router.post(
+  '/backfill-available-limit',
+  authenticateToken,
+  authorizeRoles(USER_ROLES.ADMIN, USER_ROLES.ACCOUNTANT),
+  StatementController.backfillAvailableLimit
 );
 
 // GET /api/statements/detail/:id - Get single statement by ID (must come before :month to avoid route conflict)

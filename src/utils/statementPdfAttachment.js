@@ -8,6 +8,7 @@ const {
   destroyStatementAttachment,
   isCloudinaryConfigured,
 } = require('../services/cloudinaryStatementUpload');
+const { parseAvailableLimitFromPdfBuffer } = require('./parseCardStatementAvailableLimit');
 
 const MAX_STATEMENT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const LEGACY_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'card-statements');
@@ -107,6 +108,12 @@ function resolveStagedStatementAttachment(payload) {
     url: String(url),
     publicId: String(publicId),
     resourceType: staged.resourceType || staged.resource_type || 'raw',
+    availableLimit:
+      staged.availableLimit !== undefined
+        ? staged.availableLimit
+        : staged.available_limit !== undefined
+          ? staged.available_limit
+          : undefined,
   };
 }
 
@@ -324,6 +331,10 @@ async function stageStatementAttachmentInPayload(payload, { requesterId } = {}) 
     url: uploaded.secure_url,
     publicId: uploaded.public_id,
     resourceType,
+    availableLimit:
+      decoded.kind === 'pdf'
+        ? await parseAvailableLimitFromPdfBuffer(decoded.buffer)
+        : null,
   };
   return slim;
 }
@@ -334,7 +345,15 @@ async function destroyStagedStatementAttachmentFromPayload(payload) {
   await destroyStatementAttachment(staged.publicId, staged.resourceType);
 }
 
-async function saveStatementPdfAttachmentBuffer(statementId, buffer, originalName, existingRow, kind = 'pdf') {
+async function resolveAvailableLimitForAttachment(buffer, kind, stagedLimit) {
+  if (stagedLimit !== undefined) {
+    return stagedLimit == null || stagedLimit === '' ? null : Number(stagedLimit);
+  }
+  if (kind !== 'pdf' || !buffer) return null;
+  return parseAvailableLimitFromPdfBuffer(buffer);
+}
+
+async function saveStatementPdfAttachmentBuffer(statementId, buffer, originalName, existingRow, kind = 'pdf', options = {}) {
   if (!buffer || buffer.length === 0) {
     return { ok: true };
   }
@@ -370,11 +389,18 @@ async function saveStatementPdfAttachmentBuffer(statementId, buffer, originalNam
     };
   }
 
+  const availableLimit = await resolveAvailableLimitForAttachment(
+    buffer,
+    kind,
+    options.availableLimit
+  );
+
   await Statement.update(statementId, {
     attachmentName: name,
     attachmentUrl: uploaded.secure_url,
     attachmentCloudinaryPublicId: uploaded.public_id,
     attachmentStorageKey: null,
+    availableLimit: availableLimit == null || Number.isNaN(availableLimit) ? null : availableLimit,
   });
 
   if (prevCloudinaryId && prevCloudinaryId !== uploaded.public_id) {
@@ -392,7 +418,7 @@ async function saveStatementPdfAttachmentBuffer(statementId, buffer, originalNam
     }
   }
 
-  return { ok: true };
+  return { ok: true, availableLimit };
 }
 
 async function applyStatementAttachmentToRow(statementId, payload, existingRow) {
@@ -402,11 +428,22 @@ async function applyStatementAttachmentToRow(statementId, payload, existingRow) 
     const prevCloudinaryId = row && row.attachment_cloudinary_public_id;
     const prevStorageKey = row && row.attachment_storage_key;
 
+    let availableLimit = staged.availableLimit;
+    if (availableLimit === undefined) {
+      availableLimit = null;
+    } else if (availableLimit != null && availableLimit !== '') {
+      availableLimit = Number(availableLimit);
+      if (Number.isNaN(availableLimit)) availableLimit = null;
+    } else {
+      availableLimit = null;
+    }
+
     await Statement.update(statementId, {
       attachmentName: staged.name,
       attachmentUrl: staged.url,
       attachmentCloudinaryPublicId: staged.publicId,
       attachmentStorageKey: null,
+      availableLimit,
     });
 
     if (prevCloudinaryId && prevCloudinaryId !== staged.publicId) {
@@ -421,7 +458,7 @@ async function applyStatementAttachmentToRow(statementId, payload, existingRow) 
         if (e.code !== 'ENOENT') console.error('Failed to remove legacy statement file:', e.message);
       }
     }
-    return { ok: true };
+    return { ok: true, availableLimit };
   }
 
   const decoded = decodeStatementPdfBase64FromPayload(payload);

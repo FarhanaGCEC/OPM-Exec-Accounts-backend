@@ -25,6 +25,7 @@ class Statement {
             s.epp_balance,
             s.balance_transfer,
             s.min_payment_due,
+            s.available_limit,
             s.payment_status,
             s.attachment_name,
             s.attachment_storage_key,
@@ -74,6 +75,7 @@ class Statement {
             s.epp_balance,
             s.balance_transfer,
             s.min_payment_due,
+            s.available_limit,
             s.payment_status,
             s.attachment_name,
             s.attachment_storage_key,
@@ -153,6 +155,7 @@ class Statement {
           s.epp_balance,
           s.balance_transfer,
           s.min_payment_due,
+          s.available_limit,
           s.payment_status,
           s.attachment_name,
           s.attachment_storage_key,
@@ -203,6 +206,7 @@ class Statement {
           s.epp_balance,
           s.balance_transfer,
           s.min_payment_due,
+          s.available_limit,
           s.payment_status,
           s.attachment_name,
           s.attachment_storage_key,
@@ -279,7 +283,7 @@ class Statement {
       );
 
       const fetchResult = await pool.query(
-        `SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, min_payment_due, payment_status,
+        `SELECT id, credit_card_id, statement_month, statement_date, due_date, days, due_month, total_due, paid_amount, pending_amount, epp_balance, balance_transfer, min_payment_due, available_limit, payment_status,
           attachment_name, attachment_storage_key, attachment_url, attachment_cloudinary_public_id, created_at, updated_at FROM card_statements WHERE id = ?`,
         [id]
       );
@@ -323,6 +327,7 @@ class Statement {
         eppBalance,
         balanceTransfer,
         minPaymentDue,
+        availableLimit,
         pendingAmount,
         paymentStatus,
         attachmentName,
@@ -343,6 +348,7 @@ class Statement {
       if (eppBalance !== undefined) { fields.push('epp_balance = ?'); values.push(eppBalance); }
       if (balanceTransfer !== undefined) { fields.push('balance_transfer = ?'); values.push(balanceTransfer); }
       if (minPaymentDue !== undefined) { fields.push('min_payment_due = ?'); values.push(minPaymentDue); }
+      if (availableLimit !== undefined) { fields.push('available_limit = ?'); values.push(availableLimit); }
       if (pendingAmount !== undefined) { fields.push('pending_amount = ?'); values.push(pendingAmount); }
       if (paymentStatus !== undefined) { fields.push('payment_status = ?'); values.push(paymentStatus); }
       if (attachmentName !== undefined) { fields.push('attachment_name = ?'); values.push(attachmentName); }

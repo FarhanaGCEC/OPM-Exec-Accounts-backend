@@ -13,6 +13,9 @@ const {
 } = require('../services/cloudinaryStatementUpload');
 const { saveStatementPdfAttachmentBuffer } = require('../utils/statementPdfAttachment');
 const {
+  backfillStatementAvailableLimits,
+} = require('../services/backfillStatementAvailableLimits');
+const {
   buildStatementAttachmentPayload: buildAttachmentPayload,
   normalizeMediaUrl
 } = require('../utils/attachmentPayload');
@@ -440,6 +443,9 @@ class StatementController {
           credit_balance: formatAmount(balances.credit_balance), // Overpayment amount
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
           min_payment_due: row.min_payment_due ? formatAmount(row.min_payment_due) : "0.00",
+          available_limit: row.available_limit != null && row.available_limit !== ''
+            ? formatAmount(row.available_limit)
+            : null,
           payment_status: row.payment_status || 'PARTIAL',
           created_at: row.created_at || null,
           updated_at: row.updated_at || null,
@@ -810,6 +816,9 @@ class StatementController {
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         min_payment_due: formatAmount(statement.min_payment_due),
+        available_limit: statement.available_limit != null && statement.available_limit !== ''
+          ? formatAmount(statement.available_limit)
+          : null,
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -930,6 +939,7 @@ class StatementController {
           epp_balance: 0,
           balance_transfer: 0,
           min_payment_due: 0,
+          available_limit: null,
           payment_status: 'PARTIAL',
           created_at: null,
           updated_at: null,
@@ -994,6 +1004,9 @@ class StatementController {
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         min_payment_due: formatAmount(statement.min_payment_due),
+        available_limit: statement.available_limit != null && statement.available_limit !== ''
+          ? formatAmount(statement.available_limit)
+          : null,
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -1120,6 +1133,9 @@ class StatementController {
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
         min_payment_due: formatAmount(statement.min_payment_due),
+        available_limit: statement.available_limit != null && statement.available_limit !== ''
+          ? formatAmount(statement.available_limit)
+          : null,
         payment_status: statement.payment_status,
         created_at: statement.created_at,
         updated_at: statement.updated_at,
@@ -1240,7 +1256,8 @@ class StatementController {
         attachmentName: null,
         attachmentStorageKey: null,
         attachmentUrl: null,
-        attachmentCloudinaryPublicId: null
+        attachmentCloudinaryPublicId: null,
+        availableLimit: null,
       });
 
       const statement = await Statement.getById(row.id);
@@ -1260,6 +1277,44 @@ class StatementController {
       res.status(500).json({
         success: false,
         error: error.message || 'Failed to remove attachment'
+      });
+    }
+  }
+
+  /**
+   * POST /api/statements/backfill-available-limit
+   * Admin/accountant: extract Available Limit from already-uploaded PDFs and save.
+   * Body/query: { force?: boolean, limit?: number }
+   */
+  static async backfillAvailableLimit(req, res) {
+    try {
+      const force =
+        req.body?.force === true ||
+        req.query?.force === '1' ||
+        req.query?.force === 'true';
+      const limitRaw = req.body?.limit ?? req.query?.limit;
+      const limit = limitRaw != null && limitRaw !== '' ? Number(limitRaw) : null;
+
+      const summary = await backfillStatementAvailableLimits({ force, limit });
+
+      res.json({
+        success: true,
+        message: 'Available limit backfill completed',
+        data: {
+          total: summary.total,
+          updated: summary.updated,
+          skipped_no_file: summary.skippedNoFile,
+          skipped_not_pdf: summary.skippedNotPdf,
+          skipped_no_value: summary.skippedNoValue,
+          errors: summary.errors,
+          results: summary.results,
+        },
+      });
+    } catch (error) {
+      console.error('Error backfilling available_limit:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to backfill available_limit',
       });
     }
   }

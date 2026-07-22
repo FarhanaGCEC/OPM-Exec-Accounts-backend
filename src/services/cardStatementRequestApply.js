@@ -409,6 +409,7 @@ async function clearStatementAttachmentRow(row) {
     attachmentStorageKey: null,
     attachmentUrl: null,
     attachmentCloudinaryPublicId: null,
+    availableLimit: null,
   });
 }
 

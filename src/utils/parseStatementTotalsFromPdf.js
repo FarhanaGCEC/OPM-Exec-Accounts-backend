@@ -18,7 +18,12 @@ function normalizeNumberString(value) {
   if (normalized.includes('.') && normalized.includes(',')) {
     normalized = normalized.replace(/,/g, '');
   } else if (!normalized.includes('.') && normalized.includes(',')) {
-    normalized = normalized.replace(/,/g, '.');
+    // US thousands (75,000 / 1,234,567) vs European decimal (75,50)
+    if (/^\d{1,3}(,\d{3})+$/.test(normalized)) {
+      normalized = normalized.replace(/,/g, '');
+    } else {
+      normalized = normalized.replace(/,/g, '.');
+    }
   }
 
   const parsed = Number(normalized);
@@ -157,5 +162,9 @@ async function parseStatementTotalsFromPdfPath(filePath) {
 
 module.exports = {
   parseStatementTotalsFromPdfBuffer,
-  parseStatementTotalsFromPdfPath
+  parseStatementTotalsFromPdfPath,
+  extractTextFromPdfBuffer,
+  extractByLabelVariants,
+  firstNonNull,
+  normalizeNumberString
 };
