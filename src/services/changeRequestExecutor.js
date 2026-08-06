@@ -8,6 +8,10 @@ const CreditCardPayment = require('../models/CreditCardPayment');
 const { payloadToPurchaseBillUpdate } = require('../utils/purchaseBillPayload');
 const { payloadToCreditCardPaymentUpdate } = require('../utils/creditCardPaymentPayload');
 const {
+  syncPaymentUpdated,
+  syncPaymentDeleted,
+} = require('./creditCardPaymentStatementSync');
+const {
   normalizeTransactionEditPayload,
   assertTransactionEditRequired,
 } = require('../utils/transactionChangePayload');
@@ -245,6 +249,7 @@ async function executeApprovedRequest(reqRow) {
       if (!row) return;
       const ok = await CreditCardPayment.delete(id);
       if (!ok) throw new Error('Failed to delete credit card payment');
+      await syncPaymentDeleted(row);
       return;
     }
     if (!row) throw new Error('Credit card payment not found');
@@ -255,6 +260,7 @@ async function executeApprovedRequest(reqRow) {
       }
       const updated = await CreditCardPayment.update(id, u);
       if (!updated) throw new Error('Failed to update credit card payment');
+      await syncPaymentUpdated(row, updated);
       return;
     }
   }

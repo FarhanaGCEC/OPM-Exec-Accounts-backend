@@ -547,6 +547,7 @@ const initDatabase = async () => {
         credit_card_id CHAR(36),
         customer_name VARCHAR(255),
         payment_method VARCHAR(50) NOT NULL DEFAULT 'Credit Card',
+        payment_type VARCHAR(20) NOT NULL DEFAULT 'paid',
         amount DECIMAL(15, 2) NOT NULL,
         remarks TEXT,
         paid_against VARCHAR(255),
@@ -561,6 +562,11 @@ const initDatabase = async () => {
       if (!(await columnExists('credit_card_payments', 'paid_against'))) {
         await pool.query(
           'ALTER TABLE credit_card_payments ADD COLUMN paid_against VARCHAR(255) NULL'
+        );
+      }
+      if (!(await columnExists('credit_card_payments', 'payment_type'))) {
+        await pool.query(
+          "ALTER TABLE credit_card_payments ADD COLUMN payment_type VARCHAR(20) NOT NULL DEFAULT 'paid'"
         );
       }
     }

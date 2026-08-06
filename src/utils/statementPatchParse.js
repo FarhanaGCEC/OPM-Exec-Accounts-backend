@@ -8,7 +8,8 @@ function normalizeStatementAmount(raw) {
 
 /**
  * Parse partial amount entries (paid or EPP) from request body.
- * Accepts array of numbers or { amount, paid_at?, note? } objects, or JSON string (multipart).
+ * Accepts [{ amount, paid_at, note? }] objects, or JSON string (multipart).
+ * paid_at is required (YYYY-MM-DD) for every entry.
  */
 function parseAmountEntriesInput(raw, fieldName) {
   if (raw === undefined) {
@@ -26,23 +27,26 @@ function parseAmountEntriesInput(raw, fieldName) {
     }
   }
   if (!Array.isArray(value)) {
-    return { ok: false, error: `${fieldName} must be an array of amounts or { amount } objects` };
+    return {
+      ok: false,
+      error: `${fieldName} must be an array of { amount, paid_at } objects`,
+    };
   }
 
   const entries = [];
   let total = 0;
   for (let i = 0; i < value.length; i++) {
     const item = value[i];
-    let amountRaw;
-    let paidAt = null;
-    let note = null;
-    if (item != null && typeof item === 'object' && !Array.isArray(item)) {
-      amountRaw = item.amount !== undefined ? item.amount : item.paid;
-      paidAt = item.paid_at != null ? item.paid_at : item.paidAt != null ? item.paidAt : null;
-      note = item.note != null ? item.note : null;
-    } else {
-      amountRaw = item;
+    if (item == null || typeof item !== 'object' || Array.isArray(item)) {
+      return {
+        ok: false,
+        error: `${fieldName}[${i}] must be an object with amount and paid_at (YYYY-MM-DD)`,
+      };
     }
+    const amountRaw = item.amount !== undefined ? item.amount : item.paid;
+    let paidAt = item.paid_at != null ? item.paid_at : item.paidAt != null ? item.paidAt : null;
+    const note = item.note != null ? item.note : null;
+
     const amount = normalizeStatementAmount(amountRaw);
     if (Number.isNaN(amount) || amount < 0) {
       return {
@@ -50,18 +54,21 @@ function parseAmountEntriesInput(raw, fieldName) {
         error: `${fieldName}[${i}].amount must be a valid number >= 0 (comma separators allowed)`,
       };
     }
-    if (paidAt != null && paidAt !== '') {
-      const s = String(paidAt).trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        return {
-          ok: false,
-          error: `${fieldName}[${i}].paid_at must be YYYY-MM-DD when provided`,
-        };
-      }
-      paidAt = s;
-    } else {
-      paidAt = null;
+    if (paidAt == null || paidAt === '') {
+      return {
+        ok: false,
+        error: `${fieldName}[${i}].paid_at is required (YYYY-MM-DD)`,
+      };
     }
+    const s = String(paidAt).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      return {
+        ok: false,
+        error: `${fieldName}[${i}].paid_at must be YYYY-MM-DD`,
+      };
+    }
+    paidAt = s;
+
     entries.push({
       amount,
       paid_at: paidAt,

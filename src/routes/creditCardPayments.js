@@ -8,6 +8,12 @@ const {
   assertStandardUserCanMutateCreditCardPayment,
 } = require('../controllers/creditCardPaymentChangeRequestQueue');
 const { formatAmount, roundToTwoDecimals } = require('../utils/formatAmount');
+const { normalizePaymentType, VALID_PAYMENT_TYPES } = require('../utils/creditCardPaymentPayload');
+const {
+  syncPaymentCreated,
+  syncPaymentUpdated,
+  syncPaymentDeleted,
+} = require('../services/creditCardPaymentStatementSync');
 
 const router = express.Router();
 
@@ -24,6 +30,7 @@ function toYmd(d) {
 }
 
 function formatPaymentForApi(payment) {
+  const paymentType = payment.payment_type || 'paid';
   return {
     id: payment.id,
     payment_date: toYmd(payment.payment_date),
@@ -33,6 +40,8 @@ function formatPaymentForApi(payment) {
     remarks: payment.remarks || null,
     paid_against: payment.paid_against || null,
     paidAgainst: payment.paid_against || null,
+    payment_type: paymentType,
+    paymentType,
     credit_card_id: payment.credit_card_id || payment.card_id || null,
     issuing_bank: payment.issuing_bank || null,
     created_at: payment.created_at,
@@ -43,8 +52,17 @@ function formatPaymentForApi(payment) {
 // Get all credit card payments
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const { year, months, paidAgainst, paid_against } = req.query;
+    const { year, months, paidAgainst, paid_against, paymentType, payment_type } = req.query;
     const normalizedPaidAgainst = paidAgainst ?? paid_against;
+    let normalizedPaymentType;
+    try {
+      normalizedPaymentType = normalizePaymentType(paymentType ?? payment_type);
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        error: e.message || `Invalid payment_type. Expected one of: ${VALID_PAYMENT_TYPES.join(', ')}`
+      });
+    }
 
     if (year !== undefined && (!Number.isInteger(Number(year)) || Number(year) < 1900 || Number(year) > 9999)) {
       return res.status(400).json({
@@ -63,7 +81,8 @@ router.get('/', authenticateToken, async (req, res) => {
     const payments = await CreditCardPayment.getAll({
       year: year !== undefined ? Number(year) : undefined,
       months: months !== undefined ? Number(months) : undefined,
-      paidAgainst: normalizedPaidAgainst
+      paidAgainst: normalizedPaidAgainst,
+      paymentType: normalizedPaymentType || undefined
     });
     res.json({
       success: true,
@@ -118,6 +137,7 @@ function notifyAdminPaymentCreated(req, payment) {
       payment_date: payment.payment_date,
       amount: payment.amount,
       paid_against: payment.paid_against || null,
+      payment_type: payment.payment_type || 'paid',
     },
   });
 }
@@ -125,7 +145,18 @@ function notifyAdminPaymentCreated(req, payment) {
 // Create a new credit card payment
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
+    const {
+      payment_date,
+      credit_card_id,
+      card_holder,
+      card_no,
+      amount,
+      remarks,
+      paid_against,
+      paidAgainst,
+      payment_type,
+      paymentType,
+    } = req.body;
 
     // Validation
     if (!payment_date || !amount) {
@@ -145,6 +176,16 @@ router.post('/', authenticateToken, async (req, res) => {
 
     // Round amount to 2 decimal places before saving
     const roundedAmount = roundToTwoDecimals(parsedAmount);
+
+    let normalizedPaymentType = 'paid';
+    try {
+      normalizedPaymentType = normalizePaymentType(payment_type ?? paymentType) || 'paid';
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        error: e.message || `Invalid payment_type. Expected one of: ${VALID_PAYMENT_TYPES.join(', ')}`
+      });
+    }
 
     // Convert date format if needed (DD/MM/YYYY or DD-MM-YY to YYYY-MM-DD)
     let formattedDate = payment_date;
@@ -192,11 +233,24 @@ router.post('/', authenticateToken, async (req, res) => {
       creditCardId: credit_card_id || null,
       customerName: card_holder || null, // Keep for backward compatibility
       paymentMethod: 'Credit Card',
+      paymentType: normalizedPaymentType,
       amount: roundedAmount,
       remarks: remarks || null,
       paidAgainst: paidAgainst ?? paid_against ?? null,
       createdBy: createdBy
     });
+
+    try {
+      await syncPaymentCreated(payment);
+    } catch (syncErr) {
+      console.error('Statement sync failed after credit card payment create:', syncErr);
+      return res.status(201).json({
+        success: true,
+        message: 'Credit card payment created successfully, but statement sync failed',
+        warning: syncErr.message || 'Failed to reflect payment on card statement',
+        data: formatPaymentForApi(payment)
+      });
+    }
 
     notifyAdminPaymentCreated(req, payment);
 
@@ -237,7 +291,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
         });
       }
     }
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
+    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst, payment_type, paymentType } = req.body;
     const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 
     const updateData = {};
@@ -310,13 +364,36 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (paidAgainst !== undefined || paid_against !== undefined) {
       updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
     }
+    if (payment_type !== undefined || paymentType !== undefined) {
+      try {
+        updateData.paymentType = normalizePaymentType(payment_type ?? paymentType) || 'paid';
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: e.message || `Invalid payment_type. Expected one of: ${VALID_PAYMENT_TYPES.join(', ')}`
+        });
+      }
+    }
 
+    const previousPayment = await CreditCardPayment.getById(id);
     const payment = await CreditCardPayment.update(id, updateData);
 
     if (!payment) {
       return res.status(404).json({
         success: false,
         error: 'Credit card payment not found'
+      });
+    }
+
+    try {
+      await syncPaymentUpdated(previousPayment, payment);
+    } catch (syncErr) {
+      console.error('Statement sync failed after credit card payment update:', syncErr);
+      return res.json({
+        success: true,
+        message: 'Credit card payment updated successfully, but statement sync failed',
+        warning: syncErr.message || 'Failed to reflect payment on card statement',
+        data: formatPaymentForApi(payment)
       });
     }
 
@@ -357,7 +434,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
         });
       }
     }
-    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst } = req.body;
+    const { payment_date, credit_card_id, card_holder, card_no, amount, remarks, paid_against, paidAgainst, payment_type, paymentType } = req.body;
     const hasRemarksField = Object.prototype.hasOwnProperty.call(req.body || {}, 'remarks');
 
     const updateData = {};
@@ -430,13 +507,36 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     if (paidAgainst !== undefined || paid_against !== undefined) {
       updateData.paidAgainst = (paidAgainst ?? paid_against) || null;
     }
+    if (payment_type !== undefined || paymentType !== undefined) {
+      try {
+        updateData.paymentType = normalizePaymentType(payment_type ?? paymentType) || 'paid';
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: e.message || `Invalid payment_type. Expected one of: ${VALID_PAYMENT_TYPES.join(', ')}`
+        });
+      }
+    }
 
+    const previousPayment = await CreditCardPayment.getById(id);
     const payment = await CreditCardPayment.update(id, updateData);
 
     if (!payment) {
       return res.status(404).json({
         success: false,
         error: 'Credit card payment not found'
+      });
+    }
+
+    try {
+      await syncPaymentUpdated(previousPayment, payment);
+    } catch (syncErr) {
+      console.error('Statement sync failed after credit card payment update:', syncErr);
+      return res.json({
+        success: true,
+        message: 'Credit card payment updated successfully, but statement sync failed',
+        warning: syncErr.message || 'Failed to reflect payment on card statement',
+        data: formatPaymentForApi(payment)
       });
     }
 
@@ -461,12 +561,31 @@ router.delete('/:id', authenticateToken, async (req, res) => {
   }
   try {
     const { id } = req.params;
+    const existing = await CreditCardPayment.getById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        error: 'Credit card payment not found'
+      });
+    }
+
     const deleted = await CreditCardPayment.delete(id);
 
     if (!deleted) {
       return res.status(404).json({
         success: false,
         error: 'Credit card payment not found'
+      });
+    }
+
+    try {
+      await syncPaymentDeleted(existing);
+    } catch (syncErr) {
+      console.error('Statement sync failed after credit card payment delete:', syncErr);
+      return res.json({
+        success: true,
+        message: 'Credit card payment deleted successfully, but statement sync failed',
+        warning: syncErr.message || 'Failed to remove payment from card statement'
       });
     }
 

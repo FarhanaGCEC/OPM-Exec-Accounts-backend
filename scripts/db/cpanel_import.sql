@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS credit_card_payments (
   credit_card_id CHAR(36),
   customer_name VARCHAR(255),
   payment_method VARCHAR(50) NOT NULL DEFAULT 'Credit Card',
+  payment_type VARCHAR(20) NOT NULL DEFAULT 'paid',
   amount DECIMAL(15, 2) NOT NULL,
   remarks TEXT,
   paid_against VARCHAR(255),

@@ -333,23 +333,18 @@ class StatementService {
       paymentStatus: paymentStatus
     });
 
-    // Replace partial payment breakdown when provided (or when only paid total was sent)
+    // Replace partial payment breakdown when provided (each entry requires paid_at)
     if (updateData.payments !== undefined) {
       await CardStatementPayment.replaceForStatement(statementId, updateData.payments);
-    } else if (updateData.paid_amount !== undefined) {
-      // Legacy single paid: keep breakdown as one row matching the total
-      await CardStatementPayment.replaceForStatement(statementId, [
-        { amount: paidAmount, sort_order: 0 },
-      ]);
+    } else if (updateData.paid_amount !== undefined && paidAmount === 0) {
+      await CardStatementPayment.replaceForStatement(statementId, []);
     }
 
-    // Replace partial EPP breakdown when provided (or when only epp total was sent)
+    // Replace partial EPP breakdown when provided (each entry requires paid_at)
     if (updateData.epp_payments !== undefined) {
       await CardStatementEpp.replaceForStatement(statementId, updateData.epp_payments);
-    } else if (updateData.epp_balance !== undefined) {
-      await CardStatementEpp.replaceForStatement(statementId, [
-        { amount: eppBalance, sort_order: 0 },
-      ]);
+    } else if (updateData.epp_balance !== undefined && eppBalance === 0) {
+      await CardStatementEpp.replaceForStatement(statementId, []);
     }
 
     // Fetch updated statement with card details

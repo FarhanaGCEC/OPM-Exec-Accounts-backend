@@ -1,5 +1,21 @@
 const { roundToTwoDecimals } = require('./formatAmount');
 
+const VALID_PAYMENT_TYPES = ['paid', 'epp'];
+
+/**
+ * Normalize payment_type to paid|epp. Returns null when input is empty/absent.
+ */
+function normalizePaymentType(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return null;
+  }
+  const value = String(raw).trim().toLowerCase();
+  if (!VALID_PAYMENT_TYPES.includes(value)) {
+    throw new Error(`payment_type must be one of: ${VALID_PAYMENT_TYPES.join(', ')}`);
+  }
+  return value;
+}
+
 /**
  * Normalize payment_date to YYYY-MM-DD (same rules as creditCardPayments routes).
  */
@@ -84,11 +100,17 @@ function payloadToCreditCardPaymentUpdate(payload, { requirePaymentDateAndAmount
   if (p.remarks !== undefined) u.remarks = p.remarks || null;
   if (p.paid_against !== undefined) u.paidAgainst = p.paid_against || null;
   if (p.paidAgainst !== undefined) u.paidAgainst = p.paidAgainst || null;
+  if (p.payment_type !== undefined || p.paymentType !== undefined) {
+    const normalized = normalizePaymentType(p.payment_type ?? p.paymentType);
+    u.paymentType = normalized || 'paid';
+  }
 
   return u;
 }
 
 module.exports = {
+  VALID_PAYMENT_TYPES,
+  normalizePaymentType,
   formatPaymentDateInput,
   payloadToCreditCardPaymentUpdate,
 };

@@ -39,7 +39,7 @@ class CardStatementEpp {
   /**
    * Replace all partial EPP rows for a statement.
    * @param {string} statementId
-   * @param {Array<{ amount: number, paid_at?: string|null, note?: string|null }>} entries
+   * @param {Array<{ amount: number, paid_at: string, note?: string|null }>} entries
    * @param {{ query?: Function }|null} client - optional transactional client
    */
   static async replaceForStatement(statementId, entries, client = null) {
@@ -54,6 +54,10 @@ class CardStatementEpp {
       if (Number.isNaN(amount) || amount < 0) {
         throw new Error('Each epp_payments amount must be a valid number >= 0');
       }
+      const paidAt = p.paid_at != null ? String(p.paid_at).trim() : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(paidAt)) {
+        throw new Error('Each epp_payments paid_at is required (YYYY-MM-DD)');
+      }
       await exec(
         `INSERT INTO card_statement_epp_payments
          (id, statement_id, amount, paid_at, note, sort_order)
@@ -62,7 +66,7 @@ class CardStatementEpp {
           randomUUID(),
           statementId,
           amount,
-          p.paid_at || null,
+          paidAt,
           p.note != null && String(p.note).trim() !== '' ? String(p.note).trim().slice(0, 255) : null,
           typeof p.sort_order === 'number' ? p.sort_order : i,
         ]
