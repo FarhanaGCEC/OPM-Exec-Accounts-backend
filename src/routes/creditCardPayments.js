@@ -14,6 +14,7 @@ const {
   syncPaymentUpdated,
   syncPaymentDeleted,
 } = require('../services/creditCardPaymentStatementSync');
+const { maskCardNumber } = require('../utils/maskCardNumber');
 
 const router = express.Router();
 
@@ -35,7 +36,7 @@ function formatPaymentForApi(payment) {
     id: payment.id,
     payment_date: toYmd(payment.payment_date),
     card_holder: payment.card_holder || payment.customer_name || null,
-    card_no: payment.card_number || null,
+    card_no: maskCardNumber(payment.card_number || payment.card_no || null),
     amount: formatAmount(payment.amount),
     remarks: payment.remarks || null,
     paid_against: payment.paid_against || null,

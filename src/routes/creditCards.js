@@ -2,6 +2,10 @@ const express = require('express');
 const CreditCard = require('../models/CreditCard');
 const { authenticateToken } = require('../middleware/auth');
 const { requireAdminForCards } = require('../middleware/requireAdminForCards');
+const {
+  maskCardFieldsInObject,
+  maskCardFieldsInList,
+} = require('../utils/maskCardNumber');
 
 const router = express.Router();
 
@@ -11,7 +15,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const cards = await CreditCard.getAll();
     res.json({
       success: true,
-      data: cards
+      data: maskCardFieldsInList(cards)
     });
   } catch (error) {
     console.error('Error fetching credit cards:', error);
@@ -37,7 +41,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      data: card
+      data: maskCardFieldsInObject(card)
     });
   } catch (error) {
     console.error('Error fetching credit card:', error);
@@ -109,7 +113,7 @@ router.post('/', authenticateToken, requireAdminForCards, async (req, res) => {
     res.status(201).json({
       success: true,
       message: 'Credit card created successfully',
-      data: card
+      data: maskCardFieldsInObject(card)
     });
   } catch (error) {
     console.error('Error creating credit card:', error);
@@ -196,7 +200,7 @@ router.put('/:id', authenticateToken, requireAdminForCards, async (req, res) => 
     res.json({
       success: true,
       message: 'Credit card updated successfully',
-      data: card
+      data: maskCardFieldsInObject(card)
     });
   } catch (error) {
     console.error('Error updating credit card:', error);

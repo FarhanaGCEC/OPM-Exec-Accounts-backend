@@ -35,6 +35,7 @@ const {
   parseEppPaymentsInput,
 } = require('../utils/statementPatchParse');
 const { calculateStatementBalances } = require('../utils/statementAmounts');
+const { maskCardNumber } = require('../utils/maskCardNumber');
 
 /** Format amount-entry breakdown for API; synthesize single row from total when no child rows yet. */
 function formatAmountEntriesForApi(entryRows, totalAmount) {
@@ -420,7 +421,7 @@ class StatementController {
           // Card details (always present - from cards table)
           issuing_bank: row.issuing_bank || null,
           card_holder: row.card_holder || null,
-          card_number: row.card_number || null,
+          card_number: maskCardNumber(row.card_number),
           
           // Statement details (from statements table or calculated defaults)
           // id: statement_id if exists (for editing), otherwise null
@@ -793,7 +794,7 @@ class StatementController {
         // Card details
         issuing_bank: statement.issuing_bank,
         card_holder: statement.card_holder,
-        card_number: statement.card_number,
+        card_number: maskCardNumber(statement.card_number),
         
         // IDs
         id: statement.id, // statement_id
@@ -981,7 +982,7 @@ class StatementController {
         // Card details
         issuing_bank: statement.issuing_bank,
         card_holder: statement.card_holder,
-        card_number: statement.card_number,
+        card_number: maskCardNumber(statement.card_number),
         
         // IDs
         id: statement.id, // statement_id
@@ -1114,7 +1115,7 @@ class StatementController {
       const formattedStatement = {
         issuing_bank: statement.issuing_bank,
         card_holder: statement.card_holder,
-        card_number: statement.card_number,
+        card_number: maskCardNumber(statement.card_number),
         id: statement.id,
         card_id: statement.card_id || statement.credit_card_id,
         credit_card_id: statement.credit_card_id,

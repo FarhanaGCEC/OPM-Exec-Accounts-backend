@@ -1,4 +1,8 @@
 const Card = require('../models/Card');
+const {
+  maskCardFieldsInObject,
+  maskCardFieldsInList,
+} = require('../utils/maskCardNumber');
 
 /** Accept snake_case (API docs) or camelCase (frontend) in POST/PUT body. */
 function normalizeCardBody(body) {
@@ -55,7 +59,7 @@ class CardController {
 
       res.json({
         success: true,
-        data: cards,
+        data: maskCardFieldsInList(cards),
         count: cards.length
       });
     } catch (error) {
@@ -145,7 +149,7 @@ class CardController {
       res.status(201).json({
         success: true,
         message: 'Credit card created successfully',
-        data: card
+        data: maskCardFieldsInObject(card)
       });
     } catch (error) {
       console.error('Error creating card:', error);
@@ -246,7 +250,7 @@ class CardController {
       res.json({
         success: true,
         message: 'Credit card updated successfully',
-        data: card
+        data: maskCardFieldsInObject(card)
       });
     } catch (error) {
       console.error('Error updating card:', error);
@@ -274,7 +278,7 @@ class CardController {
       res.json({
         success: true,
         message: 'Credit card deactivated successfully',
-        data: card
+        data: maskCardFieldsInObject(card)
       });
     } catch (error) {
       console.error('Error deactivating card:', error);
@@ -302,7 +306,7 @@ class CardController {
       res.json({
         success: true,
         message: 'Credit card activated successfully',
-        data: card
+        data: maskCardFieldsInObject(card)
       });
     } catch (error) {
       console.error('Error activating card:', error);
@@ -329,7 +333,7 @@ class CardController {
 
       res.json({
         success: true,
-        data: card
+        data: maskCardFieldsInObject(card)
       });
     } catch (error) {
       console.error('Error fetching card:', error);
