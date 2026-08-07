@@ -176,26 +176,28 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
       if (eppRows.length === 0 && !hadOurEpp) {
         const headerEpp = roundToTwoDecimals(stmt.epp_balance) || 0;
         if (headerEpp > 0) {
-          eppPayments.unshift({
+          eppPayments.push({
             amount: headerEpp,
             paid_at: fallbackPaidAtForMonth(statementMonth),
             note: LEGACY_HEADER_NOTE,
           });
         }
       }
-      eppPayments.push(entry);
+      // Latest first (sort_order 0)
+      eppPayments.unshift(entry);
     } else {
       if (paidRows.length === 0 && !hadOurPaid) {
         const headerPaid = roundToTwoDecimals(stmt.paid_amount) || 0;
         if (headerPaid > 0) {
-          payments.unshift({
+          payments.push({
             amount: headerPaid,
             paid_at: fallbackPaidAtForMonth(statementMonth),
             note: LEGACY_HEADER_NOTE,
           });
         }
       }
-      payments.push(entry);
+      // Latest first (sort_order 0)
+      payments.unshift(entry);
     }
   }
 
@@ -328,26 +330,65 @@ async function syncStatementBreakdownToPayments(opts) {
 }
 
 /**
- * Remove a credit-card payment's linked paid/epp row from its statement month (if any).
+ * Find statement id(s) that still reference this payment via note `ccp:{id}`.
+ */
+async function findStatementsLinkedToPayment(paymentId, preferredCardId, preferredMonth) {
+  const note = paymentLinkNote(paymentId);
+  const found = [];
+
+  if (preferredCardId && preferredMonth) {
+    const stmt = await Statement.getByCardIdAndMonth(preferredCardId, preferredMonth);
+    if (stmt) {
+      const [paidRows, eppRows] = await Promise.all([
+        CardStatementPayment.listByStatementId(stmt.id),
+        CardStatementEpp.listByStatementId(stmt.id),
+      ]);
+      if ([...paidRows, ...eppRows].some((r) => String(r.note || '') === note)) {
+        found.push({ id: stmt.id, statement_month: stmt.statement_month || preferredMonth });
+      }
+    }
+  }
+
+  // Fallback: payment date/card may have changed; locate by note on same card (or any card)
+  if (found.length === 0) {
+    const { pool } = require('../config/database');
+    const params = [note, note];
+    let cardFilter = '';
+    if (preferredCardId) {
+      cardFilter = ' AND s.credit_card_id = ?';
+      params.push(preferredCardId);
+    }
+    const result = await pool.query(
+      `SELECT DISTINCT s.id, s.statement_month
+       FROM card_statements s
+       WHERE s.id IN (
+         SELECT statement_id FROM card_statement_payments WHERE note = ?
+         UNION
+         SELECT statement_id FROM card_statement_epp_payments WHERE note = ?
+       )${cardFilter}`,
+      params
+    );
+    for (const row of result.rows || []) {
+      found.push({ id: row.id, statement_month: row.statement_month });
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Remove a credit-card payment's linked paid/epp row from statement(s) (if any).
  */
 async function removePaymentFromStatement(payment) {
   if (!payment || payment.id == null) return;
   const cardId = payment.credit_card_id || payment.card_id || null;
   const ymd = toYmd(payment.payment_date);
   const month = monthFromYmd(ymd);
-  if (!cardId || !month) return;
 
-  const stmt = await Statement.getByCardIdAndMonth(cardId, month);
-  if (!stmt) return;
-
-  const [paidRows, eppRows] = await Promise.all([
-    CardStatementPayment.listByStatementId(stmt.id),
-    CardStatementEpp.listByStatementId(stmt.id),
-  ]);
-  const linked = [...paidRows, ...eppRows].some((r) => rowMatchesPayment(r, payment.id));
-  if (!linked) return;
-
-  await rewriteStatementBreakdown(stmt.id, payment.id, month, null);
+  const linkedStatements = await findStatementsLinkedToPayment(payment.id, cardId, month);
+  for (const stmt of linkedStatements) {
+    await rewriteStatementBreakdown(stmt.id, payment.id, stmt.statement_month, null);
+  }
 }
 
 /**

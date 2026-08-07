@@ -8,7 +8,7 @@ class CardStatementPayment {
       `SELECT id, statement_id, amount, paid_at, note, sort_order, created_at
        FROM card_statement_payments
        WHERE statement_id = ?
-       ORDER BY sort_order ASC, created_at ASC`,
+       ORDER BY paid_at DESC, created_at DESC, sort_order ASC`,
       [statementId]
     );
     return result.rows;
@@ -23,7 +23,7 @@ class CardStatementPayment {
       `SELECT id, statement_id, amount, paid_at, note, sort_order, created_at
        FROM card_statement_payments
        WHERE statement_id IN (${placeholders})
-       ORDER BY sort_order ASC, created_at ASC`,
+       ORDER BY paid_at DESC, created_at DESC, sort_order ASC`,
       ids
     );
 

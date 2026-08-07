@@ -54,7 +54,7 @@ class CreditCardPayment {
         LEFT JOIN users u ON ccp.created_by = u.id
         LEFT JOIN credit_cards_new c ON ccp.credit_card_id = c.id
         ${whereSql}
-        ORDER BY ccp.payment_date DESC, ccp.created_at DESC
+        ORDER BY ccp.payment_date DESC, ccp.created_at DESC, ccp.id DESC
       `, params);
       return result.rows;
     } catch (error) {
