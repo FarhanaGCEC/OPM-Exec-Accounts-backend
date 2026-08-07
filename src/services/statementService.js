@@ -333,6 +333,22 @@ class StatementService {
       paymentStatus: paymentStatus
     });
 
+    const skipCreditCardPaymentSync = updateData._skipCreditCardPaymentSync === true;
+    const shouldSyncCreditCardPayments =
+      !skipCreditCardPaymentSync &&
+      (updateData.payments !== undefined ||
+        updateData.epp_payments !== undefined ||
+        (updateData.paid_amount !== undefined && paidAmount === 0) ||
+        (updateData.epp_balance !== undefined && eppBalance === 0));
+
+    let previousLinkedPaymentIds = [];
+    if (shouldSyncCreditCardPayments) {
+      const {
+        collectLinkedPaymentIds,
+      } = require('./creditCardPaymentStatementSync');
+      previousLinkedPaymentIds = await collectLinkedPaymentIds(statementId);
+    }
+
     // Replace partial payment breakdown when provided (each entry requires paid_at)
     if (updateData.payments !== undefined) {
       await CardStatementPayment.replaceForStatement(statementId, updateData.payments);
@@ -345,6 +361,17 @@ class StatementService {
       await CardStatementEpp.replaceForStatement(statementId, updateData.epp_payments);
     } else if (updateData.epp_balance !== undefined && eppBalance === 0) {
       await CardStatementEpp.replaceForStatement(statementId, []);
+    }
+
+    if (shouldSyncCreditCardPayments) {
+      const {
+        syncStatementBreakdownToPayments,
+      } = require('./creditCardPaymentStatementSync');
+      await syncStatementBreakdownToPayments({
+        statementId,
+        previousLinkedIds: previousLinkedPaymentIds,
+        cardId: existing.credit_card_id,
+      });
     }
 
     // Fetch updated statement with card details

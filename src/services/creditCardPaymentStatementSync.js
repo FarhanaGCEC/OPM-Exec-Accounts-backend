@@ -2,13 +2,27 @@ const Card = require('../models/Card');
 const Statement = require('../models/Statement');
 const CardStatementPayment = require('../models/CardStatementPayment');
 const CardStatementEpp = require('../models/CardStatementEpp');
+const CreditCardPayment = require('../models/CreditCardPayment');
 const StatementService = require('./statementService');
 const { roundToTwoDecimals } = require('../utils/formatAmount');
 
 const CCP_NOTE_PREFIX = 'ccp:';
+const LEGACY_HEADER_NOTE = 'legacy:header';
 
 function paymentLinkNote(paymentId) {
   return `${CCP_NOTE_PREFIX}${paymentId}`;
+}
+
+function parsePaymentIdFromNote(note) {
+  const s = String(note || '').trim();
+  const m = /^ccp:(\d+)$/i.exec(s);
+  if (!m) return null;
+  const id = parseInt(m[1], 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function isLegacyHeaderNote(note) {
+  return String(note || '').trim().toLowerCase() === LEGACY_HEADER_NOTE;
 }
 
 function toYmd(d) {
@@ -57,6 +71,22 @@ function sumAmounts(entries) {
 
 function rowMatchesPayment(row, paymentId) {
   return String(row.note || '') === paymentLinkNote(paymentId);
+}
+
+/**
+ * Collect linked credit_card_payment ids currently referenced on a statement.
+ */
+async function collectLinkedPaymentIds(statementId) {
+  const [paidRows, eppRows] = await Promise.all([
+    CardStatementPayment.listByStatementId(statementId),
+    CardStatementEpp.listByStatementId(statementId),
+  ]);
+  const ids = new Set();
+  for (const row of [...paidRows, ...eppRows]) {
+    const id = parsePaymentIdFromNote(row.note);
+    if (id) ids.add(id);
+  }
+  return [...ids];
 }
 
 /**
@@ -114,8 +144,7 @@ async function ensureStatementForCardMonth(cardId, statementMonth) {
 
 /**
  * Rewrite paid/epp breakdown for a payment link.
- * - Preserves legacy header totals when a bucket has no child rows yet.
- * - Only touches buckets that are linked / being written / already have children.
+ * Uses _skipCreditCardPaymentSync to avoid payment ↔ statement loops.
  *
  * @param {string} statementId
  * @param {string|number} paymentId
@@ -144,14 +173,13 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
       note: paymentLinkNote(paymentId),
     };
     if (addEntry.type === 'epp') {
-      // First linked child for this bucket: keep prior header total as its own row
       if (eppRows.length === 0 && !hadOurEpp) {
         const headerEpp = roundToTwoDecimals(stmt.epp_balance) || 0;
         if (headerEpp > 0) {
           eppPayments.unshift({
             amount: headerEpp,
             paid_at: fallbackPaidAtForMonth(statementMonth),
-            note: null,
+            note: LEGACY_HEADER_NOTE,
           });
         }
       }
@@ -163,7 +191,7 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
           payments.unshift({
             amount: headerPaid,
             paid_at: fallbackPaidAtForMonth(statementMonth),
-            note: null,
+            note: LEGACY_HEADER_NOTE,
           });
         }
       }
@@ -180,10 +208,9 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
     (addEntry && addEntry.type === 'epp') ||
     eppRows.length > 0;
 
-  // Nothing to do (e.g. delete of never-synced payment, and no children)
   if (!touchPaid && !touchEpp) return;
 
-  const updateData = {};
+  const updateData = { _skipCreditCardPaymentSync: true };
   if (touchPaid) {
     updateData.payments = payments;
     updateData.paid_amount = sumAmounts(payments);
@@ -194,6 +221,110 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
   }
 
   await StatementService.updateStatement(statementId, updateData);
+}
+
+/**
+ * Statement → credit_card_payments (after paid/epp breakdown change).
+ * Entries linked via note `ccp:{id}` are updated; new rows create payments and rewrite notes.
+ * Removed `ccp:` links delete the corresponding credit card payments.
+ *
+ * @param {{ statementId: string, previousLinkedIds?: number[], cardId?: string }} opts
+ */
+async function syncStatementBreakdownToPayments(opts) {
+  const statementId = opts && opts.statementId;
+  if (!statementId) return;
+
+  const stmt = await Statement.getById(statementId);
+  if (!stmt) return;
+
+  const cardId = opts.cardId || stmt.credit_card_id || stmt.card_id || null;
+  if (!cardId) return;
+
+  const previousLinkedIds = Array.isArray(opts.previousLinkedIds) ? opts.previousLinkedIds : [];
+  const statementMonth = stmt.statement_month || null;
+
+  const [paidRows, eppRows] = await Promise.all([
+    CardStatementPayment.listByStatementId(statementId),
+    CardStatementEpp.listByStatementId(statementId),
+  ]);
+
+  const kept = new Set();
+  let needsRewrite = false;
+
+  async function processBucket(rows, paymentType) {
+    const out = [];
+    for (const row of rows || []) {
+      const amount = roundToTwoDecimals(row.amount);
+      if (!Number.isFinite(amount) || amount < 0) continue;
+
+      const paidAt =
+        toYmd(row.paid_at) ||
+        (statementMonth ? fallbackPaidAtForMonth(statementMonth) : null);
+      if (!paidAt) continue;
+
+      const rawNote =
+        row.note != null && String(row.note).trim() !== '' ? String(row.note).trim() : null;
+
+      if (isLegacyHeaderNote(rawNote)) {
+        out.push({ amount, paid_at: paidAt, note: LEGACY_HEADER_NOTE });
+        continue;
+      }
+
+      const linkedId = parsePaymentIdFromNote(rawNote);
+      if (linkedId) {
+        const existing = await CreditCardPayment.getById(linkedId);
+        if (existing) {
+          await CreditCardPayment.update(linkedId, {
+            paymentDate: paidAt,
+            creditCardId: cardId,
+            amount,
+            paymentType,
+          });
+          kept.add(linkedId);
+          out.push({ amount, paid_at: paidAt, note: paymentLinkNote(linkedId) });
+          continue;
+        }
+      }
+
+      const created = await CreditCardPayment.create({
+        paymentDate: paidAt,
+        creditCardId: cardId,
+        customerName: stmt.card_holder || null,
+        paymentMethod: 'Credit Card',
+        paymentType,
+        amount,
+        remarks: linkedId ? null : rawNote,
+        paidAgainst: null,
+        createdBy: null,
+      });
+      kept.add(created.id);
+      needsRewrite = true;
+      out.push({ amount, paid_at: paidAt, note: paymentLinkNote(created.id) });
+    }
+    return out;
+  }
+
+  const newPaid = await processBucket(paidRows, 'paid');
+  const newEpp = await processBucket(eppRows, 'epp');
+
+  if (needsRewrite) {
+    await StatementService.updateStatement(statementId, {
+      payments: newPaid,
+      epp_payments: newEpp,
+      paid_amount: sumAmounts(newPaid),
+      epp_balance: sumAmounts(newEpp),
+      _skipCreditCardPaymentSync: true,
+    });
+  }
+
+  for (const id of previousLinkedIds) {
+    if (kept.has(id)) continue;
+    try {
+      await CreditCardPayment.delete(id);
+    } catch (err) {
+      console.error('Failed to delete orphaned credit card payment after statement sync:', id, err);
+    }
+  }
 }
 
 /**
@@ -235,7 +366,6 @@ async function applyPaymentToStatement(payment) {
   const type = String(payment.payment_type || 'paid').trim().toLowerCase() === 'epp' ? 'epp' : 'paid';
   const stmt = await ensureStatementForCardMonth(cardId, month);
 
-  // Clear prior link on this statement (type may have switched paid ↔ epp)
   await rewriteStatementBreakdown(stmt.id, payment.id, month, {
     type,
     amount,
@@ -243,16 +373,10 @@ async function applyPaymentToStatement(payment) {
   });
 }
 
-/**
- * After create: reflect on statement.
- */
 async function syncPaymentCreated(payment) {
   await applyPaymentToStatement(payment);
 }
 
-/**
- * After update: drop old link (card/month may have changed), then apply new.
- */
 async function syncPaymentUpdated(previousPayment, nextPayment) {
   const prevCard = previousPayment
     ? previousPayment.credit_card_id || previousPayment.card_id || null
@@ -274,19 +398,18 @@ async function syncPaymentUpdated(previousPayment, nextPayment) {
   if (previousPayment && !sameTarget) {
     await removePaymentFromStatement(previousPayment);
   }
-  // sameTarget: apply upserts (removes old note in both buckets then re-adds)
   await applyPaymentToStatement(nextPayment);
 }
 
-/**
- * Before/after delete: remove linked statement row. Prefer calling with the payment row before delete.
- */
 async function syncPaymentDeleted(payment) {
   await removePaymentFromStatement(payment);
 }
 
 module.exports = {
   paymentLinkNote,
+  LEGACY_HEADER_NOTE,
+  collectLinkedPaymentIds,
+  syncStatementBreakdownToPayments,
   syncPaymentCreated,
   syncPaymentUpdated,
   syncPaymentDeleted,
