@@ -8,6 +8,8 @@ const { roundToTwoDecimals } = require('../utils/formatAmount');
 
 const CCP_NOTE_PREFIX = 'ccp:';
 const LEGACY_HEADER_NOTE = 'legacy:header';
+/** Default remarks when a paid partial is created from a card statement. */
+const DEFAULT_PAID_REMARKS = 'GCEC Cloud';
 
 function paymentLinkNote(paymentId) {
   return `${CCP_NOTE_PREFIX}${paymentId}`;
@@ -40,6 +42,77 @@ function toYmd(d) {
 function monthFromYmd(ymd) {
   if (!ymd || typeof ymd !== 'string' || ymd.length < 7) return null;
   return ymd.slice(0, 7);
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function shiftCalendarMonth(year, month /* 1–12 */, delta) {
+  const dt = new Date(year, month - 1 + delta, 1);
+  return { year: dt.getFullYear(), month: dt.getMonth() + 1 };
+}
+
+/**
+ * Map payment date → statement_month (YYYY-MM) using the card's statement_day.
+ *
+ * Cycle for statement month M (example statement_day = 19):
+ *   July  (2026-07): 20-Jul .. 19-Aug  (statement dated 19-Jul covers through next stmt day)
+ *   August(2026-08): 20-Aug .. 19-Sep
+ * Payment ON a statement day closes the prior cycle (19-Aug → July, 20-Aug → August).
+ *
+ * Examples (statement_day = 19, SCB):
+ *   2026-07-19 → 2026-06
+ *   2026-07-20 .. 2026-08-19 → 2026-07
+ *   2026-08-20 .. 2026-09-19 → 2026-08
+ * Examples (statement_day = 2, DEEM):
+ *   2026-08-02 → 2026-07
+ *   2026-08-03 .. 2026-09-02 → 2026-08
+ * Examples (statement_day = 8, CBD):
+ *   2026-08-08 → 2026-07
+ *   2026-08-09 .. 2026-09-08 → 2026-08
+ */
+function statementMonthForPaymentDate(paymentYmd, statementDay) {
+  if (!paymentYmd || typeof paymentYmd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(paymentYmd)) {
+    return null;
+  }
+  const y = parseInt(paymentYmd.slice(0, 4), 10);
+  const m = parseInt(paymentYmd.slice(5, 7), 10);
+  const d = parseInt(paymentYmd.slice(8, 10), 10);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;
+
+  let day = parseInt(statementDay, 10);
+  if (!Number.isInteger(day) || day < 1) day = 1;
+  if (day > 31) day = 31;
+
+  const daysInThisMonth = new Date(y, m, 0).getDate();
+  const thisMonthStmtDay = Math.min(day, daysInThisMonth);
+
+  // Inclusive end: on/before this month's statement day → previous statement month
+  // e.g. day=19: Aug 19 still July; Aug 20 starts August
+  if (d <= thisMonthStmtDay) {
+    const prev = shiftCalendarMonth(y, m, -1);
+    return `${prev.year}-${pad2(prev.month)}`;
+  }
+  return `${y}-${pad2(m)}`;
+}
+
+async function resolveStatementMonthForPayment(payment) {
+  const ymd = toYmd(payment && payment.payment_date);
+  const cardId = payment ? payment.credit_card_id || payment.card_id || null : null;
+  if (!ymd) return { ymd: null, month: null, cardId };
+
+  let statementDay = 1;
+  if (cardId) {
+    const card = await Card.getById(cardId);
+    if (card && card.statement_day != null && card.statement_day !== '') {
+      statementDay = card.statement_day;
+    }
+  }
+
+  const month =
+    statementMonthForPaymentDate(ymd, statementDay) || monthFromYmd(ymd);
+  return { ymd, month, cardId };
 }
 
 function fallbackPaidAtForMonth(statementMonth) {
@@ -226,11 +299,132 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
 }
 
 /**
+ * Partition statement paid/epp rows into those that belong on this statement_month
+ * vs those whose paid_at falls in a *later* statement cycle (forward rehome only).
+ * Legacy header rows always stay put.
+ */
+function partitionRowsByStatementMonth(rows, statementMonth, statementDay) {
+  const keep = [];
+  /** @type {Map<string, Array<{ amount: number, paid_at: string, note: string|null }>>} */
+  const moves = new Map();
+  /** @type {Set<number>} */
+  const movedPaymentIds = new Set();
+
+  for (const row of rows || []) {
+    const amount = roundToTwoDecimals(row.amount);
+    if (!Number.isFinite(amount) || amount < 0) continue;
+
+    const paidAt =
+      toYmd(row.paid_at) ||
+      (statementMonth ? fallbackPaidAtForMonth(statementMonth) : null);
+    if (!paidAt) continue;
+
+    const note =
+      row.note != null && String(row.note).trim() !== ''
+        ? String(row.note).trim()
+        : null;
+    const entry = { amount, paid_at: paidAt, note };
+
+    if (isLegacyHeaderNote(note)) {
+      keep.push(entry);
+      continue;
+    }
+
+    const targetMonth =
+      statementMonthForPaymentDate(paidAt, statementDay) || statementMonth;
+    // Only move forward (e.g. Jul statement + Aug-24 → August).
+    // Do not pull older-cycle dates backward off this statement.
+    if (!targetMonth || targetMonth <= statementMonth) {
+      keep.push(entry);
+      continue;
+    }
+
+    if (!moves.has(targetMonth)) moves.set(targetMonth, []);
+    moves.get(targetMonth).push(entry);
+    const linkedId = parsePaymentIdFromNote(note);
+    if (linkedId) movedPaymentIds.add(linkedId);
+  }
+
+  return { keep, moves, movedPaymentIds };
+}
+
+/**
+ * Move paid/epp rows whose paid_at belongs to a later cycle month onto that
+ * statement (create the month row if needed). Does not run CCP sync itself.
+ *
+ * @returns {Promise<{ movedToIds: string[], movedPaymentIds: Set<number> }>}
+ */
+async function rehomeMisplacedBreakdownEntries(stmt, cardId, statementDay) {
+  const statementId = stmt && stmt.id;
+  const statementMonth = stmt && stmt.statement_month;
+  if (!statementId || !statementMonth || !cardId) {
+    return { movedToIds: [], movedPaymentIds: new Set() };
+  }
+
+  const [paidRows, eppRows] = await Promise.all([
+    CardStatementPayment.listByStatementId(statementId),
+    CardStatementEpp.listByStatementId(statementId),
+  ]);
+
+  const paidPart = partitionRowsByStatementMonth(paidRows, statementMonth, statementDay);
+  const eppPart = partitionRowsByStatementMonth(eppRows, statementMonth, statementDay);
+
+  if (paidPart.moves.size === 0 && eppPart.moves.size === 0) {
+    return { movedToIds: [], movedPaymentIds: new Set() };
+  }
+
+  await StatementService.updateStatement(statementId, {
+    payments: paidPart.keep,
+    epp_payments: eppPart.keep,
+    paid_amount: sumAmounts(paidPart.keep),
+    epp_balance: sumAmounts(eppPart.keep),
+    _skipCreditCardPaymentSync: true,
+  });
+
+  const movedPaymentIds = new Set([
+    ...paidPart.movedPaymentIds,
+    ...eppPart.movedPaymentIds,
+  ]);
+  const movedToIds = [];
+  const months = new Set([...paidPart.moves.keys(), ...eppPart.moves.keys()]);
+
+  for (const month of months) {
+    const target = await ensureStatementForCardMonth(cardId, month);
+    const [tPaid, tEpp] = await Promise.all([
+      CardStatementPayment.listByStatementId(target.id),
+      CardStatementEpp.listByStatementId(target.id),
+    ]);
+
+    const addPaid = paidPart.moves.get(month) || [];
+    const addEpp = eppPart.moves.get(month) || [];
+    const updateData = { _skipCreditCardPaymentSync: true };
+
+    if (addPaid.length > 0) {
+      const existingPaid = rowsToEntries(tPaid, month, null);
+      updateData.payments = [...addPaid, ...existingPaid];
+      updateData.paid_amount = sumAmounts(updateData.payments);
+    }
+    if (addEpp.length > 0) {
+      const existingEpp = rowsToEntries(tEpp, month, null);
+      updateData.epp_payments = [...addEpp, ...existingEpp];
+      updateData.epp_balance = sumAmounts(updateData.epp_payments);
+    }
+
+    await StatementService.updateStatement(target.id, updateData);
+    movedToIds.push(target.id);
+  }
+
+  return { movedToIds, movedPaymentIds };
+}
+
+/**
  * Statement → credit_card_payments (after paid/epp breakdown change).
  * Entries linked via note `ccp:{id}` are updated; new rows create payments and rewrite notes.
  * Removed `ccp:` links delete the corresponding credit card payments.
+ * Payments dated after this statement's cycle (per card statement_day) are moved
+ * forward to the correct next statement month before syncing.
  *
- * @param {{ statementId: string, previousLinkedIds?: number[], cardId?: string }} opts
+ * @param {{ statementId: string, previousLinkedIds?: number[], cardId?: string, _skipRehome?: boolean }} opts
  */
 async function syncStatementBreakdownToPayments(opts) {
   const statementId = opts && opts.statementId;
@@ -244,6 +438,20 @@ async function syncStatementBreakdownToPayments(opts) {
 
   const previousLinkedIds = Array.isArray(opts.previousLinkedIds) ? opts.previousLinkedIds : [];
   const statementMonth = stmt.statement_month || null;
+
+  let statementDay = 1;
+  const card = await Card.getById(cardId);
+  if (card && card.statement_day != null && card.statement_day !== '') {
+    statementDay = card.statement_day;
+  }
+
+  let movedPaymentIds = new Set();
+  let movedToIds = [];
+  if (!opts._skipRehome) {
+    const rehome = await rehomeMisplacedBreakdownEntries(stmt, cardId, statementDay);
+    movedPaymentIds = rehome.movedPaymentIds;
+    movedToIds = rehome.movedToIds;
+  }
 
   const [paidRows, eppRows] = await Promise.all([
     CardStatementPayment.listByStatementId(statementId),
@@ -288,6 +496,16 @@ async function syncStatementBreakdownToPayments(opts) {
         }
       }
 
+      // New statement paid rows get default remarks; keep any explicit note.
+      // Linked payment updates above never touch remarks (user edits stay).
+      let remarks = linkedId ? null : rawNote;
+      if (
+        paymentType === 'paid' &&
+        (remarks == null || String(remarks).trim() === '')
+      ) {
+        remarks = DEFAULT_PAID_REMARKS;
+      }
+
       const created = await CreditCardPayment.create({
         paymentDate: paidAt,
         creditCardId: cardId,
@@ -295,7 +513,7 @@ async function syncStatementBreakdownToPayments(opts) {
         paymentMethod: 'Credit Card',
         paymentType,
         amount,
-        remarks: linkedId ? null : rawNote,
+        remarks,
         paidAgainst: null,
         createdBy: null,
       });
@@ -319,8 +537,20 @@ async function syncStatementBreakdownToPayments(opts) {
     });
   }
 
+  // Sync destination months first so moved ccp: links are kept before orphan delete.
+  for (const otherId of movedToIds) {
+    if (!otherId || otherId === statementId) continue;
+    await syncStatementBreakdownToPayments({
+      statementId: otherId,
+      previousLinkedIds: [],
+      cardId,
+      _skipRehome: true,
+    });
+  }
+
   for (const id of previousLinkedIds) {
     if (kept.has(id)) continue;
+    if (movedPaymentIds.has(id)) continue;
     try {
       await CreditCardPayment.delete(id);
     } catch (err) {
@@ -381,9 +611,7 @@ async function findStatementsLinkedToPayment(paymentId, preferredCardId, preferr
  */
 async function removePaymentFromStatement(payment) {
   if (!payment || payment.id == null) return;
-  const cardId = payment.credit_card_id || payment.card_id || null;
-  const ymd = toYmd(payment.payment_date);
-  const month = monthFromYmd(ymd);
+  const { cardId, month } = await resolveStatementMonthForPayment(payment);
 
   const linkedStatements = await findStatementsLinkedToPayment(payment.id, cardId, month);
   for (const stmt of linkedStatements) {
@@ -393,13 +621,12 @@ async function removePaymentFromStatement(payment) {
 
 /**
  * Apply (upsert) a credit-card payment onto the card statement paid or epp section.
+ * Statement month follows the card's statement_day cycle, not calendar month.
  */
 async function applyPaymentToStatement(payment) {
   if (!payment || payment.id == null) return;
-  const cardId = payment.credit_card_id || payment.card_id || null;
-  const ymd = toYmd(payment.payment_date);
-  const month = monthFromYmd(ymd);
-  if (!cardId || !month) return;
+  const { ymd, month, cardId } = await resolveStatementMonthForPayment(payment);
+  if (!cardId || !month || !ymd) return;
 
   const amount = roundToTwoDecimals(payment.amount);
   if (!Number.isFinite(amount) || amount <= 0) return;
@@ -419,22 +646,20 @@ async function syncPaymentCreated(payment) {
 }
 
 async function syncPaymentUpdated(previousPayment, nextPayment) {
-  const prevCard = previousPayment
-    ? previousPayment.credit_card_id || previousPayment.card_id || null
-    : null;
-  const nextCard = nextPayment
-    ? nextPayment.credit_card_id || nextPayment.card_id || null
-    : null;
-  const prevMonth = previousPayment ? monthFromYmd(toYmd(previousPayment.payment_date)) : null;
-  const nextMonth = nextPayment ? monthFromYmd(toYmd(nextPayment.payment_date)) : null;
+  const prev = previousPayment
+    ? await resolveStatementMonthForPayment(previousPayment)
+    : { cardId: null, month: null };
+  const next = nextPayment
+    ? await resolveStatementMonthForPayment(nextPayment)
+    : { cardId: null, month: null };
 
   const sameTarget =
-    prevCard &&
-    nextCard &&
-    prevCard === nextCard &&
-    prevMonth &&
-    nextMonth &&
-    prevMonth === nextMonth;
+    prev.cardId &&
+    next.cardId &&
+    prev.cardId === next.cardId &&
+    prev.month &&
+    next.month &&
+    prev.month === next.month;
 
   if (previousPayment && !sameTarget) {
     await removePaymentFromStatement(previousPayment);
@@ -449,6 +674,7 @@ async function syncPaymentDeleted(payment) {
 module.exports = {
   paymentLinkNote,
   LEGACY_HEADER_NOTE,
+  statementMonthForPaymentDate,
   collectLinkedPaymentIds,
   syncStatementBreakdownToPayments,
   syncPaymentCreated,
