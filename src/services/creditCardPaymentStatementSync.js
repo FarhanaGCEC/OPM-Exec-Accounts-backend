@@ -10,6 +10,13 @@ const CCP_NOTE_PREFIX = 'ccp:';
 const LEGACY_HEADER_NOTE = 'legacy:header';
 /** Default remarks when a paid partial is created from a card statement. */
 const DEFAULT_PAID_REMARKS = 'GCEC Cloud';
+/**
+ * When false, credit_card_payments and card_statements stay independent:
+ * - Statement paid/epp edits do not create/update/delete CCP rows
+ * - CCP create/update/delete does not rewrite statement paid/epp breakdown
+ * Set true to restore bidirectional sync.
+ */
+const CREDIT_CARD_PAYMENT_STATEMENT_SYNC_ENABLED = false;
 
 function paymentLinkNote(paymentId) {
   return `${CCP_NOTE_PREFIX}${paymentId}`;
@@ -427,6 +434,8 @@ async function rehomeMisplacedBreakdownEntries(stmt, cardId, statementDay) {
  * @param {{ statementId: string, previousLinkedIds?: number[], cardId?: string, _skipRehome?: boolean }} opts
  */
 async function syncStatementBreakdownToPayments(opts) {
+  if (!CREDIT_CARD_PAYMENT_STATEMENT_SYNC_ENABLED) return;
+
   const statementId = opts && opts.statementId;
   if (!statementId) return;
 
@@ -642,10 +651,13 @@ async function applyPaymentToStatement(payment) {
 }
 
 async function syncPaymentCreated(payment) {
+  if (!CREDIT_CARD_PAYMENT_STATEMENT_SYNC_ENABLED) return;
   await applyPaymentToStatement(payment);
 }
 
 async function syncPaymentUpdated(previousPayment, nextPayment) {
+  if (!CREDIT_CARD_PAYMENT_STATEMENT_SYNC_ENABLED) return;
+
   const prev = previousPayment
     ? await resolveStatementMonthForPayment(previousPayment)
     : { cardId: null, month: null };
@@ -668,6 +680,7 @@ async function syncPaymentUpdated(previousPayment, nextPayment) {
 }
 
 async function syncPaymentDeleted(payment) {
+  if (!CREDIT_CARD_PAYMENT_STATEMENT_SYNC_ENABLED) return;
   await removePaymentFromStatement(payment);
 }
 
