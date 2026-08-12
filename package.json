@@ -9,6 +9,7 @@
     "dev": "npx nodemon src/index.js",
     "db:init": "node scripts/db/init.js",
     "db:seed": "node scripts/db/seed.js",
+    "db:clean-legacy-payments": "node scripts/db/remove-legacy-header-payments.js",
     "backfill:available-limit": "node scripts/backfill-available-limit.js",
     "test": "echo \"No tests configured (skipped).\" && exit 0"
   },

@@ -36,15 +36,16 @@ const {
 } = require('../utils/statementPatchParse');
 const { calculateStatementBalances } = require('../utils/statementAmounts');
 const { maskCardNumber } = require('../utils/maskCardNumber');
+const { sanitizeBreakdownEntries, sumBreakdownAmounts, normalizePaidAtYmd } = require('../utils/statementPaymentEntries');
 
 /** Format amount-entry breakdown for API; synthesize single row from total when no child rows yet. */
-function formatAmountEntriesForApi(entryRows, totalAmount) {
-  const rows = Array.isArray(entryRows) ? entryRows : [];
+function formatAmountEntriesForApi(entryRows, totalAmount, statementMonth) {
+  const rows = sanitizeBreakdownEntries(entryRows, statementMonth);
   if (rows.length > 0) {
     return rows.map((p) => ({
       id: p.id || null,
       amount: formatAmount(p.amount),
-      paid_at: p.paid_at || null,
+      paid_at: normalizePaidAtYmd(p.paid_at) || p.paid_at || null,
       note: p.note || null,
       sort_order: p.sort_order != null ? p.sort_order : 0,
     }));
@@ -437,9 +438,9 @@ class StatementController {
           due_month: calculatedDueMonth || (row.due_date ? getMonthAbbreviation(row.due_date) : null),
           total_payment_due: row.total_due ? formatAmount(row.total_due) : "0.00", // Matches "Total Payment Due"
           paid: row.paid_amount ? formatAmount(row.paid_amount) : "0.00", // Matches "Paid"
-          payments: formatAmountEntriesForApi(paymentRows, row.paid_amount),
+          payments: formatAmountEntriesForApi(paymentRows, row.paid_amount, statementMonth),
           epp: row.epp_balance ? formatAmount(row.epp_balance) : "0.00", // Matches "EPP"
-          epp_payments: formatAmountEntriesForApi(eppRows, row.epp_balance),
+          epp_payments: formatAmountEntriesForApi(eppRows, row.epp_balance, statementMonth),
           amount_pending: formatAmount(balances.amount_pending), // Never negative
           credit_balance: formatAmount(balances.credit_balance), // Overpayment amount
           balance_transfer: row.balance_transfer ? formatAmount(row.balance_transfer) : "0.00",
@@ -746,6 +747,19 @@ class StatementController {
       if (parsedPayments !== undefined) updateData.payments = parsedPayments;
       if (parsedEppPayments !== undefined) updateData.epp_payments = parsedEppPayments;
 
+      const stmtMonth = existingStatement.statement_month || month || null;
+      if (updateData.payments !== undefined) {
+        updateData.payments = sanitizeBreakdownEntries(updateData.payments, stmtMonth);
+        updateData.paid_amount = sumBreakdownAmounts(updateData.payments);
+      }
+      if (updateData.epp_payments !== undefined) {
+        updateData.epp_payments = sanitizeBreakdownEntries(
+          updateData.epp_payments,
+          stmtMonth
+        );
+        updateData.epp_balance = sumBreakdownAmounts(updateData.epp_payments);
+      }
+
       if (min_payment_due !== undefined) {
         console.log('[STATEMENT] min_payment_due received', {
           cardOrStatementId: id,
@@ -810,9 +824,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
-        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount, statement.statement_month),
         epp: formatAmount(statement.epp_balance),
-        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance, statement.statement_month),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
@@ -998,9 +1012,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
-        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount, statement.statement_month),
         epp: formatAmount(statement.epp_balance),
-        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance, statement.statement_month),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),
@@ -1127,9 +1141,9 @@ class StatementController {
         due_month: formattedDueMonth,
         total_payment_due: formatAmount(statement.total_due),
         paid: formatAmount(statement.paid_amount),
-        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount),
+        payments: formatAmountEntriesForApi(paymentRows, statement.paid_amount, statement.statement_month),
         epp: formatAmount(statement.epp_balance),
-        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance),
+        epp_payments: formatAmountEntriesForApi(eppRows, statement.epp_balance, statement.statement_month),
         amount_pending: formatAmount(balances.amount_pending),
         credit_balance: formatAmount(balances.credit_balance),
         balance_transfer: formatAmount(statement.balance_transfer),

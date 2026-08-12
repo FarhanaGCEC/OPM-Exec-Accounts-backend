@@ -5,6 +5,9 @@ const CardStatementEpp = require('../models/CardStatementEpp');
 const { pool } = require('../config/database');
 const { randomUUID } = require('crypto');
 const { calculateStatementBalances } = require('../utils/statementAmounts');
+const {
+  sanitizeBreakdownEntries,
+} = require('../utils/statementPaymentEntries');
 
 class StatementService {
   /**
@@ -351,14 +354,22 @@ class StatementService {
 
     // Replace partial payment breakdown when provided (each entry requires paid_at)
     if (updateData.payments !== undefined) {
-      await CardStatementPayment.replaceForStatement(statementId, updateData.payments);
+      const stmtMonth = existing.statement_month || null;
+      await CardStatementPayment.replaceForStatement(
+        statementId,
+        sanitizeBreakdownEntries(updateData.payments, stmtMonth)
+      );
     } else if (updateData.paid_amount !== undefined && paidAmount === 0) {
       await CardStatementPayment.replaceForStatement(statementId, []);
     }
 
     // Replace partial EPP breakdown when provided (each entry requires paid_at)
     if (updateData.epp_payments !== undefined) {
-      await CardStatementEpp.replaceForStatement(statementId, updateData.epp_payments);
+      const stmtMonth = existing.statement_month || null;
+      await CardStatementEpp.replaceForStatement(
+        statementId,
+        sanitizeBreakdownEntries(updateData.epp_payments, stmtMonth)
+      );
     } else if (updateData.epp_balance !== undefined && eppBalance === 0) {
       await CardStatementEpp.replaceForStatement(statementId, []);
     }

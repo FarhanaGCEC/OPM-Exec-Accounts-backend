@@ -5,9 +5,13 @@ const CardStatementEpp = require('../models/CardStatementEpp');
 const CreditCardPayment = require('../models/CreditCardPayment');
 const StatementService = require('./statementService');
 const { roundToTwoDecimals } = require('../utils/formatAmount');
+const {
+  LEGACY_HEADER_NOTE,
+  isLegacyHeaderNote,
+  sanitizeBreakdownEntries,
+} = require('../utils/statementPaymentEntries');
 
 const CCP_NOTE_PREFIX = 'ccp:';
-const LEGACY_HEADER_NOTE = 'legacy:header';
 /** Default remarks when a paid partial is created from a card statement. */
 const DEFAULT_PAID_REMARKS = 'GCEC Cloud';
 /**
@@ -28,10 +32,6 @@ function parsePaymentIdFromNote(note) {
   if (!m) return null;
   const id = parseInt(m[1], 10);
   return Number.isInteger(id) && id > 0 ? id : null;
-}
-
-function isLegacyHeaderNote(note) {
-  return String(note || '').trim().toLowerCase() === LEGACY_HEADER_NOTE;
 }
 
 function toYmd(d) {
@@ -253,29 +253,9 @@ async function rewriteStatementBreakdown(statementId, paymentId, statementMonth,
       note: paymentLinkNote(paymentId),
     };
     if (addEntry.type === 'epp') {
-      if (eppRows.length === 0 && !hadOurEpp) {
-        const headerEpp = roundToTwoDecimals(stmt.epp_balance) || 0;
-        if (headerEpp > 0) {
-          eppPayments.push({
-            amount: headerEpp,
-            paid_at: fallbackPaidAtForMonth(statementMonth),
-            note: LEGACY_HEADER_NOTE,
-          });
-        }
-      }
       // Latest first (sort_order 0)
       eppPayments.unshift(entry);
     } else {
-      if (paidRows.length === 0 && !hadOurPaid) {
-        const headerPaid = roundToTwoDecimals(stmt.paid_amount) || 0;
-        if (headerPaid > 0) {
-          payments.push({
-            amount: headerPaid,
-            paid_at: fallbackPaidAtForMonth(statementMonth),
-            note: LEGACY_HEADER_NOTE,
-          });
-        }
-      }
       // Latest first (sort_order 0)
       payments.unshift(entry);
     }
@@ -380,11 +360,14 @@ async function rehomeMisplacedBreakdownEntries(stmt, cardId, statementDay) {
     return { movedToIds: [], movedPaymentIds: new Set() };
   }
 
+  const keptPaid = sanitizeBreakdownEntries(paidPart.keep, statementMonth);
+  const keptEpp = sanitizeBreakdownEntries(eppPart.keep, statementMonth);
+
   await StatementService.updateStatement(statementId, {
-    payments: paidPart.keep,
-    epp_payments: eppPart.keep,
-    paid_amount: sumAmounts(paidPart.keep),
-    epp_balance: sumAmounts(eppPart.keep),
+    payments: keptPaid,
+    epp_payments: keptEpp,
+    paid_amount: sumAmounts(keptPaid),
+    epp_balance: sumAmounts(keptEpp),
     _skipCreditCardPaymentSync: true,
   });
 
@@ -408,12 +391,30 @@ async function rehomeMisplacedBreakdownEntries(stmt, cardId, statementDay) {
 
     if (addPaid.length > 0) {
       const existingPaid = rowsToEntries(tPaid, month, null);
-      updateData.payments = [...addPaid, ...existingPaid];
+      const existingNotes = new Set(
+        existingPaid.map((e) => e.note).filter((n) => n != null && String(n).trim() !== '')
+      );
+      const newPaid = addPaid.filter(
+        (e) => !e.note || !existingNotes.has(String(e.note).trim())
+      );
+      updateData.payments = sanitizeBreakdownEntries(
+        [...newPaid, ...existingPaid],
+        month
+      );
       updateData.paid_amount = sumAmounts(updateData.payments);
     }
     if (addEpp.length > 0) {
       const existingEpp = rowsToEntries(tEpp, month, null);
-      updateData.epp_payments = [...addEpp, ...existingEpp];
+      const existingNotes = new Set(
+        existingEpp.map((e) => e.note).filter((n) => n != null && String(n).trim() !== '')
+      );
+      const newEpp = addEpp.filter(
+        (e) => !e.note || !existingNotes.has(String(e.note).trim())
+      );
+      updateData.epp_payments = sanitizeBreakdownEntries(
+        [...newEpp, ...existingEpp],
+        month
+      );
       updateData.epp_balance = sumAmounts(updateData.epp_payments);
     }
 
