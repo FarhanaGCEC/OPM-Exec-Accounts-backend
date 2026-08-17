@@ -30,6 +30,39 @@ function toYmd(d) {
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
 }
 
+function parseYearMonthsQuery(year, months) {
+  let parsedYear;
+  if (year !== undefined && year !== null && String(year).trim() !== '') {
+    parsedYear = Number(year);
+    if (!Number.isInteger(parsedYear) || parsedYear < 1900 || parsedYear > 9999) {
+      return { ok: false, error: 'Invalid year. Expected a valid 4-digit year.' };
+    }
+  }
+
+  if (months === undefined || months === null || String(months).trim() === '') {
+    return { ok: true, year: parsedYear, monthList: undefined };
+  }
+
+  const monthNumbers = String(months)
+    .split(',')
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+  const monthList = [];
+  for (const raw of monthNumbers) {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > 12) {
+      return {
+        ok: false,
+        error: 'Invalid months. Expected 1-12 or comma-separated list (e.g. 7,8).',
+      };
+    }
+    if (!monthList.includes(n)) monthList.push(n);
+  }
+
+  return { ok: true, year: parsedYear, monthList };
+}
+
 function formatPaymentForApi(payment) {
   const paymentType = payment.payment_type || 'paid';
   return {
@@ -65,23 +98,17 @@ router.get('/', authenticateToken, async (req, res) => {
       });
     }
 
-    if (year !== undefined && (!Number.isInteger(Number(year)) || Number(year) < 1900 || Number(year) > 9999)) {
+    const parsedMonths = parseYearMonthsQuery(year, months);
+    if (!parsedMonths.ok) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid year. Expected a valid 4-digit year.'
-      });
-    }
-
-    if (months !== undefined && (!Number.isInteger(Number(months)) || Number(months) < 1 || Number(months) > 12)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid months. Expected value between 1 and 12.'
+        error: parsedMonths.error,
       });
     }
 
     const payments = await CreditCardPayment.getAll({
-      year: year !== undefined ? Number(year) : undefined,
-      months: months !== undefined ? Number(months) : undefined,
+      year: parsedMonths.year,
+      months: parsedMonths.monthList,
       paidAgainst: normalizedPaidAgainst,
       paymentType: normalizedPaymentType || undefined
     });

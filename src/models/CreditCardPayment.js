@@ -16,8 +16,18 @@ class CreditCardPayment {
       }
 
       if (months !== undefined && months !== null && String(months).trim() !== '') {
-        whereClauses.push('MONTH(ccp.payment_date) = ?');
-        params.push(Number(months));
+        const monthList = (Array.isArray(months) ? months : String(months).split(','))
+          .map((m) => Number(String(m).trim()))
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
+        if (monthList.length === 1) {
+          whereClauses.push('MONTH(ccp.payment_date) = ?');
+          params.push(monthList[0]);
+        } else if (monthList.length > 1) {
+          whereClauses.push(
+            `MONTH(ccp.payment_date) IN (${monthList.map(() => '?').join(', ')})`
+          );
+          params.push(...monthList);
+        }
       }
 
       if (paidAgainst !== undefined && paidAgainst !== null && String(paidAgainst).trim() !== '') {
