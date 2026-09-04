@@ -37,6 +37,7 @@ const { applyPdcChequeAttachmentFromRequest } = require('../utils/pdcChequeAttac
 const { payloadWantsRemoveAttachment } = require('../utils/chequeAttachmentRemove');
 const { bodyHasPdcFieldUpdates, mergePdcUpdateWithExisting } = require('../utils/pdcChangeRequestPayload');
 const { isCloudinaryConfigured } = require('../services/cloudinaryTransactionUpload');
+const { enrichAedTransactionRowForDisplay } = require('../utils/dailyLedgerDisplay');
 
 const router = express.Router();
 
@@ -277,6 +278,8 @@ function mapPdcMaturedToSyntheticRow(pdc, { transactionType } = {}) {
           ? '09:00:00'
           : '00:00:00',
     category: pdc.customer_name || '-',
+    customerName: pdc.customer_name || null,
+    pdcDescription: pdc.description || null,
     paymentType: 'cheque',
     chequeNumber: pdc.cheque_number || '-',
     debit: debitValue,
@@ -691,11 +694,13 @@ router.get('/', authenticateToken, async (req, res) => {
         ? rowsForRunningBalance[rowsForRunningBalance.length - 1].balance
         : '0.00';
 
+    const dataWithDisplay = formattedTransactions.map(enrichAedTransactionRowForDisplay);
+
     res.json({
       success: true,
-      data: formattedTransactions,
+      data: dataWithDisplay,
       currentBalance: currentBalance,
-      totalTransactions: formattedTransactions.length
+      totalTransactions: dataWithDisplay.length
     });
   } catch (error) {
     console.error('Error fetching transactions:', error);

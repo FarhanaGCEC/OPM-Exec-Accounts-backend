@@ -22,6 +22,7 @@ router.get('/', authenticateToken, async (req, res) => {
       bankCharges: formatAmount(txn.bank_charges || 0),
       credit: formatAmount(txn.credit || 0),
       balance: formatAmount(txn.balance),
+      remarks: txn.remarks || null,
       createdBy: txn.created_by,
       createdByUsername: txn.created_by_username || null,
       createdAt: txn.created_at,
@@ -91,6 +92,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
         bankCharges: formatAmount(transaction.bank_charges || 0),
         credit: formatAmount(transaction.credit || 0),
         balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at,
@@ -116,7 +118,8 @@ router.post('/', authenticateToken, async (req, res) => {
       details, 
       debit, 
       bank_charges, 
-      credit 
+      credit,
+      remarks
     } = req.body;
 
     // Validation
@@ -196,6 +199,7 @@ router.post('/', authenticateToken, async (req, res) => {
       debit: parsedDebit,
       bankCharges: parsedBankCharges,
       credit: parsedCredit,
+      remarks: remarks || null,
       createdBy: createdBy
     });
 
@@ -212,6 +216,7 @@ router.post('/', authenticateToken, async (req, res) => {
         bankCharges: formatAmount(transaction.bank_charges || 0),
         credit: formatAmount(transaction.credit || 0),
         balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at
@@ -250,7 +255,8 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       details, 
       debit, 
       bank_charges, 
-      credit 
+      credit,
+      remarks
     } = req.body;
 
     // For PATCH, merge with existing values
@@ -261,6 +267,7 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
     const finalBankCharges = bank_charges !== undefined ? bank_charges : (isPatch ? existingTransaction.bank_charges : null);
     const finalCredit = credit !== undefined ? credit : (isPatch ? existingTransaction.credit : null);
     const finalAccountNumber = account_number !== undefined ? account_number : (isPatch ? existingTransaction.account_number : null);
+    const finalRemarks = remarks !== undefined ? remarks : (isPatch ? existingTransaction.remarks : null);
 
     // Validation
     if (!finalDate || !finalDescription) {
@@ -335,7 +342,8 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
       details: finalDetails || null,
       debit: parsedDebit,
       bankCharges: parsedBankCharges,
-      credit: parsedCredit
+      credit: parsedCredit,
+      remarks: finalRemarks || null
     });
 
     if (!transaction) {
@@ -358,6 +366,7 @@ const updateTransactionHandler = async (req, res, isPatch = false) => {
         bankCharges: formatAmount(transaction.bank_charges || 0),
         credit: formatAmount(transaction.credit || 0),
         balance: formatAmount(transaction.balance),
+        remarks: transaction.remarks || null,
         createdBy: transaction.created_by,
         createdByUsername: transaction.created_by_username,
         createdAt: transaction.created_at,

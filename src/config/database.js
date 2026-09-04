@@ -766,12 +766,18 @@ const initDatabase = async () => {
         bank_charges DECIMAL(15, 2) DEFAULT 0,
         credit DECIMAL(15, 2) DEFAULT 0,
         balance DECIMAL(15, 2) NOT NULL,
+        remarks TEXT,
         created_by INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    if (await tableExists('usd_transactions')) {
+      if (!(await columnExists('usd_transactions', 'remarks'))) {
+        await pool.query('ALTER TABLE usd_transactions ADD COLUMN remarks TEXT NULL');
+      }
+    }
     await ensureIndex('usd_transactions', 'idx_usd_transactions_date', '`date`');
     await ensureIndex('usd_transactions', 'idx_usd_transactions_account', 'account_number');
     await ensureIndex('usd_transactions', 'idx_usd_transactions_date', '`date`');
@@ -789,12 +795,18 @@ const initDatabase = async () => {
         bank_charges DECIMAL(15, 2) DEFAULT 0,
         credit DECIMAL(15, 2) DEFAULT 0,
         balance DECIMAL(15, 2) NOT NULL,
+        remarks TEXT,
         created_by INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
+    if (await tableExists('gbp_transactions')) {
+      if (!(await columnExists('gbp_transactions', 'remarks'))) {
+        await pool.query('ALTER TABLE gbp_transactions ADD COLUMN remarks TEXT NULL');
+      }
+    }
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_account', 'account_number');
     await ensureIndex('gbp_transactions', 'idx_gbp_transactions_date', '`date`');

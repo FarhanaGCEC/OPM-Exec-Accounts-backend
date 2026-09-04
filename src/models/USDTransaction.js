@@ -47,6 +47,7 @@ class USDTransaction {
           t.bank_charges,
           t.credit,
           t.balance,
+          t.remarks,
           t.created_by,
           u.username as created_by_username,
           t.created_at,
@@ -75,6 +76,7 @@ class USDTransaction {
           t.bank_charges,
           t.credit,
           t.balance,
+          t.remarks,
           t.created_by,
           u.username as created_by_username,
           t.created_at,
@@ -104,7 +106,8 @@ class USDTransaction {
         details, 
         debit, 
         bankCharges, 
-        credit, 
+        credit,
+        remarks,
         createdBy 
       } = transactionData;
       
@@ -139,8 +142,8 @@ class USDTransaction {
       // Insert transaction
       let insertQuery = `
         INSERT INTO usd_transactions 
-        (account_number, date, description, details, debit, bank_charges, credit, balance, created_by) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (account_number, date, description, details, debit, bank_charges, credit, balance, remarks, created_by) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
       const insertParams = [
         accountNumber || null,
@@ -151,6 +154,7 @@ class USDTransaction {
         roundedBankCharges,
         roundedCredit,
         newBalance,
+        remarks || null,
         createdBy || null
       ];
       
@@ -191,7 +195,7 @@ class USDTransaction {
       }
 
       const fetchResult = await pool.query(
-        'SELECT id, account_number, date, description, details, debit, bank_charges, credit, balance, created_by, created_at FROM usd_transactions WHERE id = ?',
+        'SELECT id, account_number, date, description, details, debit, bank_charges, credit, balance, remarks, created_by, created_at FROM usd_transactions WHERE id = ?',
         [insertedId]
       );
       const transaction = fetchResult.rows[0];
@@ -220,7 +224,8 @@ class USDTransaction {
         details, 
         debit, 
         bankCharges, 
-        credit 
+        credit,
+        remarks
       } = transactionData;
 
       // Round amounts to 2 decimal places
@@ -249,7 +254,7 @@ class USDTransaction {
       const result = await pool.query(
         `UPDATE usd_transactions 
          SET account_number = ?, date = ?, description = ?, details = ?, 
-             debit = ?, bank_charges = ?, credit = ?, balance = ?, updated_at = CURRENT_TIMESTAMP
+             debit = ?, bank_charges = ?, credit = ?, balance = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?
         `,
         [
@@ -261,6 +266,7 @@ class USDTransaction {
           roundedBankCharges,
           roundedCredit,
           newBalance,
+          remarks || null,
           id
         ]
       );
